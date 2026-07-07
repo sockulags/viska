@@ -132,21 +132,36 @@ dikteringen körs mot den tills du växlar tillbaka.
 - **Fel mikrofon efter dockning/headsetbyte**: traymenyn → "Byt till ny
   standardmikrofon".
 
-## Bygga fristående .exe
+## Fristående .exe för andra datorer
 
 För att köra Viska på en dator utan Python/uv (t.ex. jobbdatorn):
 
 ```
 uv pip install pyinstaller
-uv run python build.py          # CPU-variant (~100 MB zip) – funkar överallt
-uv run python build.py --gpu    # tar även med CUDA-biblioteken (~+1,2 GB)
+uv run python build.py          # universalpaket (~100 MB zip)
+uv run python build.py --gpu    # buntar även CUDA-biblioteken (~+1,3 GB)
 ```
 
-Resultatet är `dist/Viska/Viska.exe` plus en zip. Kopiera över zippen,
-packa upp var som helst och kör `Viska.exe` — ingen installation, inga
-adminrättigheter. Modellen laddas ner första gången (CPU-varianten
-använder kb-whisper-small, ~0,5 GB). Autostart på den datorn:
+Kopiera zippen, packa upp var som helst, kör `Viska.exe` — ingen
+installation, inga adminrättigheter.
+
+**Första starten** känner Viska av datorns hårdvara:
+
+- Finns en NVIDIA-GPU erbjuds valet att ladda ner CUDA-biblioteken
+  (~1,4 GB, hämtas från PyPI till `%APPDATA%\viska`) för GPU-läge med
+  bästa modellen och livetranskribering — eller att köra CPU-läge direkt.
+- Har datorn redan komplett CUDA (toolkit + cuDNN) används det utan
+  någon nedladdning.
+- Utan NVIDIA-GPU körs CPU-läget utan frågor.
+
+Valet går att ändra när som helst: Inställningar → GPU-stöd (ladda
+ner/ta bort), eller `Viska.exe --setup-gpu` / `--remove-gpu`.
+Whisper-modellen laddas ner första gången appen används (kb-whisper-small
+~0,5 GB på CPU, kb-whisper-large ~3 GB på GPU). Autostart:
 `Viska.exe --install-autostart`.
+
+`--gpu`-bygget behövs alltså bara för datorer som ska köra GPU-läge helt
+offline; annars räcker universalpaketet.
 
 ## Verktyg för test
 

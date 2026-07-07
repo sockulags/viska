@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from viska import __version__
+from viska import __version__, gpu
 from viska.audio import SAMPLE_RATE, Recorder
 from viska.config import CONFIG_DIR, CONFIG_PATH, LOG_PATH, load, save
 from viska.hotkey import HotkeyError, PushToTalk
@@ -54,6 +54,10 @@ class App:
         # Tkinter är huvudtrådsbundet; trayn lägger UI-jobb här i stället.
         self._ui_queue: queue.Queue = queue.Queue()
         self._settings: SettingsWindow | None = None
+        # En GPU-åtgärd (nedladdning/borttagning) i taget — annars kan ett
+        # återöppnat Inställningar-fönster starta en andra nedladdning som
+        # raderar och skriver om samma filer som den första.
+        self._gpu_busy = threading.Event()
         self.hotkey = PushToTalk(
             cfg["hotkey"], cfg["hold_threshold_s"], self._on_start, self._on_stop
         )
@@ -279,7 +283,79 @@ class App:
         if self._settings is not None and self._settings.win.winfo_exists():
             self._settings.win.lift()
             return
-        self._settings = SettingsWindow(self.root, self.cfg, self._apply_settings)
+        self._settings = SettingsWindow(
+            self.root, self.cfg, self._apply_settings, gpu_panel=self._gpu_panel()
+        )
+
+    def _gpu_panel(self) -> dict:
+        if self._gpu_busy.is_set():
+            return {"state": "GPU-åtgärd pågår…", "action": None}
+        t = self.transcribers.get(self.language)
+        if t is not None and t.device == "cuda":
+            state = "aktivt (CUDA)"
+        elif gpu.has_nvidia_gpu():
+            state = "NVIDIA-GPU hittad men GPU-läget är inaktivt"
+        else:
+            return {"state": "ingen NVIDIA-GPU hittad", "action": None}
+        if gpu.downloaded_libs_installed():
+            return {
+                "state": state,
+                "action": "remove",
+                "label": "Ta bort GPU-stöd",
+                "run": self._remove_gpu_async,
+            }
+        if t is not None and t.device == "cuda":
+            # CUDA körs redan via systemets/pip:ens bibliotek —
+            # en nedladdning vore meningslös.
+            return {"state": state + " – via systemets CUDA", "action": None}
+        if not gpu.gpu_support_present():
+            return {
+                "state": state,
+                "action": "download",
+                "label": f"Ladda ner GPU-stöd (~{gpu.DOWNLOAD_SIZE_GB} GB)",
+                "run": self._download_gpu_async,
+            }
+        return {"state": state, "action": None}
+
+    def _download_gpu_async(self, progress, done, error) -> None:
+        if self._gpu_busy.is_set():
+            error("En GPU-åtgärd pågår redan.")
+            return
+        self._gpu_busy.set()
+
+        def work():
+            try:
+                gpu.download_gpu_libs(progress=progress)
+                self._load_model(self.language, force=True)
+                done("GPU-stöd installerat och modellen omladdad.")
+            except Exception as e:
+                log.exception("GPU-nedladdningen misslyckades")
+                error(f"Misslyckades: {e}")
+            finally:
+                self._gpu_busy.clear()
+
+        threading.Thread(target=work, daemon=True, name="viska-gpu-dl").start()
+
+    def _remove_gpu_async(self, progress, done, error) -> None:
+        if self._gpu_busy.is_set():
+            error("En GPU-åtgärd pågår redan.")
+            return
+        self._gpu_busy.set()
+
+        def work():
+            try:
+                if gpu.remove_gpu_libs():
+                    self._load_model(self.language, force=True)
+                    done("GPU-stöd borttaget – kör på CPU.")
+                else:
+                    done("Tas bort vid nästa start (CUDA används just nu).")
+            except Exception as e:
+                log.exception("Borttagningen misslyckades")
+                error(f"Misslyckades: {e}")
+            finally:
+                self._gpu_busy.clear()
+
+        threading.Thread(target=work, daemon=True, name="viska-gpu-rm").start()
 
     def _apply_settings(self, changes: dict):
         """Körs i huvudtråden (Spara-knappen). Returnerar felsträng eller None."""
@@ -493,10 +569,31 @@ def main() -> None:
     )
     parser.add_argument("--install-autostart", action="store_true")
     parser.add_argument("--uninstall-autostart", action="store_true")
+    parser.add_argument(
+        "--setup-gpu", action="store_true", help="ladda ner CUDA-biblioteken"
+    )
+    parser.add_argument(
+        "--remove-gpu", action="store_true", help="ta bort nedladdade CUDA-bibliotek"
+    )
     args = parser.parse_args()
 
     _setup_logging()
+    gpu.cleanup_pending_removal()  # före första CUDA-laddningen
+    first_run = not CONFIG_PATH.exists()
     cfg = load()
+
+    if args.setup_gpu:
+        gpu.download_gpu_libs(
+            progress=lambda t, f: print(f"\r{t} {f:>4.0%}", end="", flush=True)
+        )
+        print("\nKlart – GPU-stödet används vid nästa start.")
+        return
+    if args.remove_gpu:
+        if gpu.remove_gpu_libs():
+            print("GPU-biblioteken borttagna.")
+        else:
+            print("Låsta av en körande Viska – tas bort vid nästa start.")
+        return
 
     if args.list_devices:
         import sounddevice as sd
@@ -523,6 +620,10 @@ def main() -> None:
 
     root = tk.Tk()
     root.withdraw()
+    if first_run:
+        from viska import firstrun
+
+        firstrun.run(root)
     try:
         app = App(root, cfg)
     except HotkeyError as e:

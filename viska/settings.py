@@ -2,6 +2,7 @@
 tray-menyn begär öppning via App:s UI-kö.
 """
 
+import queue
 import tkinter as tk
 from tkinter import ttk
 
@@ -20,10 +21,13 @@ _LIVE_CHOICES = {"Auto (på med GPU)": "auto", "På": True, "Av": False}
 
 
 class SettingsWindow:
-    def __init__(self, root: tk.Tk, cfg: dict, on_save):
+    def __init__(self, root: tk.Tk, cfg: dict, on_save, gpu_panel: dict | None = None):
         """on_save(ändringar: dict) -> None | str. Returnerad sträng visas
-        som fel och fönstret hålls öppet."""
+        som fel och fönstret hålls öppet. gpu_panel: {"state", "action",
+        "label", "run"} från App._gpu_panel()."""
         self._on_save = on_save
+        self._gpu_panel = gpu_panel
+        self._gpu_queue: queue.Queue = queue.Queue()
         self.win = tk.Toplevel(root)
         self.win.title("Viska – inställningar")
         self.win.resizable(False, False)
@@ -105,6 +109,25 @@ class SettingsWindow:
         ).pack(anchor="w")
         row += 1
 
+        if gpu_panel is not None:
+            ttk.Separator(body).grid(
+                row=row, column=0, columnspan=2, sticky="we", pady=8
+            )
+            row += 1
+            ttk.Label(body, text="GPU-stöd").grid(row=row, column=0, sticky="nw")
+            gpu_frame = ttk.Frame(body)
+            gpu_frame.grid(row=row, column=1, sticky="w")
+            self._gpu_status = ttk.Label(gpu_frame, text=gpu_panel["state"])
+            self._gpu_status.pack(anchor="w")
+            self._gpu_progress = ttk.Progressbar(gpu_frame, length=240, maximum=1.0)
+            if gpu_panel.get("action"):
+                self._gpu_button = ttk.Button(
+                    gpu_frame, text=gpu_panel["label"], command=self._run_gpu_action
+                )
+                self._gpu_button.pack(anchor="w", pady=(4, 0))
+            row += 1
+            self._poll_gpu()
+
         self._error = ttk.Label(body, text="", foreground="#c0392b")
         self._error.grid(row=row, column=0, columnspan=2, sticky="w")
         row += 1
@@ -115,6 +138,33 @@ class SettingsWindow:
             side="right", padx=(6, 0)
         )
         ttk.Button(buttons, text="Spara", command=self._save).pack(side="right")
+
+    # -- GPU-panelen ------------------------------------------------------------
+
+    def _run_gpu_action(self) -> None:
+        self._gpu_button.config(state="disabled")
+        self._gpu_progress.pack(anchor="w", pady=(4, 0))
+        # Callbackarna anropas från arbetstråden — marshallas via kön.
+        self._gpu_panel["run"](
+            progress=lambda t, f: self._gpu_queue.put(("progress", t, f)),
+            done=lambda msg: self._gpu_queue.put(("done", msg, 1.0)),
+            error=lambda msg: self._gpu_queue.put(("error", msg, 0.0)),
+        )
+
+    def _poll_gpu(self) -> None:
+        try:
+            while True:
+                kind, text, frac = self._gpu_queue.get_nowait()
+                if kind == "progress":
+                    self._gpu_status.config(text=text)
+                    self._gpu_progress["value"] = frac
+                else:
+                    self._gpu_status.config(text=text)
+                    self._gpu_progress.pack_forget()
+        except queue.Empty:
+            pass
+        if self.win.winfo_exists():
+            self.win.after(150, self._poll_gpu)
 
     def values(self) -> dict:
         return {

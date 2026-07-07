@@ -39,6 +39,15 @@ def _add_nvidia_dll_dirs() -> None:
             Path(sp) / "nvidia"
             for sp in {sysconfig.get_path("purelib"), sysconfig.get_path("platlib")}
         ]
+    # Eftermonterat GPU-stöd (förstagångsdialogen/Inställningar).
+    from viska.gpu import GPU_LIB_DIR, system_cuda_dirs
+
+    roots.append(GPU_LIB_DIR)
+    # Systeminstallerat CUDA Toolkit (CUDA_PATH) — läggs FÖRST så att våra
+    # nedladdade/pip-versioner vinner om båda finns (kända versioner).
+    for bin_dir in system_cuda_dirs():
+        os.add_dll_directory(str(bin_dir))
+        os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
     for nvidia in roots:
         if not nvidia.is_dir():
             continue
