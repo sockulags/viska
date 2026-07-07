@@ -95,7 +95,7 @@ class App:
         # session-värdena, så att en ändring i Inställningar mitt i en
         # diktering inte kan byta beteende halvvägs.
         self._session_flow = False
-        self._session_polish_prompt = cfg["polish_prompt"]
+        self._session_polish_prompt = llm.resolve_polish_prompt(cfg)
         # Fönstret dikteringen gäller, fryst vid start. Flow-läget skriver
         # tillbaka den polerade texten hit så resultatet hamnar rätt även om
         # fokus hunnit flytta under poleringen.
@@ -346,8 +346,10 @@ class App:
                     target=self._refresh_ollama_reachable, daemon=True
                 ).start()
             self._session_flow = flow_flag and self._flow_polish_available()
-            self._session_polish_prompt = (
-                profile.get("polish_prompt") or self.cfg["polish_prompt"]
+            # Poleringsuppgift via den gemensamma upplösningen (mall/fritext →
+            # global) så flow och F8 alltid väljer samma stil.
+            self._session_polish_prompt = llm.resolve_polish_prompt(
+                self.cfg, profile
             )
             self.sounds.start()
             self._set_tray_recording(True)
@@ -979,7 +981,7 @@ class App:
         target_hwnd = foreground_window()
         fg = foreground_app()
         profile = self.cfg["app_profiles"].get(fg, {}) if fg else {}
-        app_default = profile.get("polish_prompt") or self.cfg["polish_prompt"]
+        app_default = llm.resolve_polish_prompt(self.cfg, profile)
         lang = self.language
         # Markera upptaget REDAN NU — innan menyn ens hunnit visas. Då blockerar
         # guarden ovan varje ytterligare tryck så länge menyn står öppen; först
@@ -1095,8 +1097,9 @@ class App:
             fg = foreground_app()
             profile = self.cfg["app_profiles"].get(fg, {}) if fg else {}
             if style is None:
-                # Appens egen ton — samma väg som enkeltryck och flow väljer.
-                style = profile.get("polish_prompt") or self.cfg["polish_prompt"]
+                # Appens egen ton via den gemensamma upplösningen (mall/fritext
+                # → global) — samma väg som flow och tonvalsmenyn väljer.
+                style = llm.resolve_polish_prompt(self.cfg, profile)
             text = grab_selection()
             if not text or not text.strip():
                 restore_original_clipboard()  # rensa ev. sparat original

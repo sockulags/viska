@@ -313,6 +313,69 @@ def tone_presets(lang: str) -> list[tuple[str, str]]:
     return _TONE_PRESETS.get(lang, _TONE_PRESETS["sv"])
 
 
+# -- Poleringsmallar: ett bibliotek som global standard och app-profiler pekar på
+
+
+def polish_templates(cfg: dict) -> list[dict]:
+    """Mallbiblioteket, rensat från trasiga poster (tål handredigerad config).
+    Varje post: {"namn": str, "prompt": str}."""
+    result = []
+    for t in cfg.get("polish_templates") or []:
+        if isinstance(t, dict) and str(t.get("namn", "")).strip():
+            result.append(
+                {"namn": str(t["namn"]).strip(), "prompt": str(t.get("prompt", ""))}
+            )
+    return result
+
+
+def template_prompt(cfg: dict, name: str) -> str | None:
+    """Poleringsuppgiften för mallen med angivet namn, eller None om den inte
+    finns i biblioteket (t.ex. raderad)."""
+    for t in polish_templates(cfg):
+        if t["namn"] == name:
+            return t["prompt"]
+    return None
+
+
+def resolve_polish_prompt(cfg: dict, profile: dict | None = None) -> str:
+    """Gemensam upplösning av poleringsuppgiften för alla poleringsvägar
+    (F8-enkeltryck, tonvalsmenyns "Appens standard" och flow-läget): app-profil
+    → mall/fritext → global standard.
+
+    En profil kan peka på en mall (polish_template), ha egen fritext
+    (polish_prompt, dagens "Egen text") eller ingetdera — då ärvs den globala
+    standarden. Den globala standarden pekar i sin tur på en mall eller på sin
+    egen fritext. En pekare till en raderad mall faller tillbaka på global
+    standard (och loggar en rad), så en polering aldrig blir tom av misstag."""
+    profile = profile or {}
+    tmpl = (profile.get("polish_template") or "").strip()
+    if tmpl:
+        prompt = template_prompt(cfg, tmpl)
+        if prompt is not None:
+            return prompt
+        log.info(
+            'App-profilens poleringsmall "%s" saknas – faller tillbaka på '
+            "global standard",
+            tmpl,
+        )
+    elif profile.get("polish_prompt"):
+        return profile["polish_prompt"]  # Egen text (bakåtkompatibelt)
+    return _resolve_global_polish(cfg)
+
+
+def _resolve_global_polish(cfg: dict) -> str:
+    name = (cfg.get("polish_template") or "").strip()
+    if name:
+        prompt = template_prompt(cfg, name)
+        if prompt is not None:
+            return prompt
+        log.info(
+            'Global poleringsmall "%s" saknas – faller tillbaka på fritexten',
+            name,
+        )
+    return cfg.get("polish_prompt", "")
+
+
 def _system_prompt(style: str, lang: str = "sv") -> str:
     if lang == "en":
         task = (

@@ -50,9 +50,12 @@ DEFAULTS = {
     # Profiler per app: nyckel = processnamn (gemener, t.ex. "code.exe").
     # Värden: initial_prompt (ordlista utöver den globala), inject_mode
     # ("paste"/"type"), language ("sv"/"en"; utelämnad = aktivt språk —
-    # språk byts ALDRIG automatiskt utan bara via uttrycklig profil),
-    # polish_prompt (egen uppgift vid polering) och flow (true = polera
-    # dikteringen automatiskt; utelämnad = ärver den globala "flow" nedan).
+    # språk byts ALDRIG automatiskt utan bara via uttrycklig profil) och
+    # flow (true = polera dikteringen automatiskt; utelämnad = ärver den
+    # globala "flow" nedan). Poleringsuppgift: antingen polish_template
+    # (namn på en mall i polish_templates) ELLER polish_prompt (egen
+    # fritext, "Egen text"). Saknas båda ärver profilen den globala
+    # standarden.
     "app_profiles": {},
     # Röstkommandon: talade fraser som blir formatering i stället för
     # text. Lägg till egna eller ta bort rader för att stänga av.
@@ -65,9 +68,62 @@ DEFAULTS = {
     # Polering: markera text var som helst, tryck tangenten, få den
     # omskriven av en lokal LLM. Modellen laddas ner via Inställningar.
     "polish_hotkey": "f8",
-    # Global uppgiftsbeskrivning (tom = "skriv om till korrekt text").
-    # Per-app-varianter läggs i app_profiles som polish_prompt.
+    # Global uppgiftsbeskrivning som "Egen text" (tom = "skriv om till
+    # korrekt text"). Används när polish_template nedan är tom. Behålls som
+    # bakåtkompatibelt förval: äldre config-filer med fritext här fortsätter
+    # gälla oförändrat.
     "polish_prompt": "",
+    # Mallbibliotek för polering: en lista av {namn, prompt}. Den globala
+    # standarden (polish_template nedan) och varje app-profil PEKAR på en
+    # mall via namn — ändras en mall slår det igenom överallt där den
+    # används. Standardmallarna är redigerbara och raderbara, och nya kan
+    # läggas till i Inställningar → Polering. Tömmer man listan finns inga
+    # mallar kvar och allt faller tillbaka på "Egen text".
+    "polish_templates": [
+        {
+            "namn": "Mejl",
+            "prompt": (
+                "Skriv om texten till ett artigt och välformulerat mejl med "
+                "naturligt flyt. Behåll alla sakuppgifter och lägg inte till "
+                "hälsnings- eller avslutningsfras som inte redan finns."
+            ),
+        },
+        {
+            "namn": "Commit-text",
+            "prompt": (
+                "Skriv om texten till en kortfattad commit-text i imperativ "
+                '(t.ex. "Lägg till", "Rätta"). Beskriv vad ändringen gör, '
+                "inte hur den formulerades."
+            ),
+        },
+        {
+            "namn": "Chattsvar",
+            "prompt": (
+                "Skriv om texten till ett kort och ledigt chattsvar i "
+                "vardaglig ton. Behåll innebörden och var tydlig och vänlig "
+                "utan att bli formell."
+            ),
+        },
+        {
+            "namn": "Formell text",
+            "prompt": (
+                "Skriv om texten till vårdat, formellt skriftspråk. Undvik "
+                "talspråk och slarviga förkortningar men behåll innebörden "
+                "och alla sakuppgifter."
+            ),
+        },
+        {
+            "namn": "Kortfattat",
+            "prompt": (
+                "Skriv om texten så kort och koncist som möjligt utan att "
+                "innebörden tappas. Ta bort upprepningar och överflödiga ord."
+            ),
+        },
+    ],
+    # Vilken mall den globala standardpoleringen pekar på. Tom = "Egen text"
+    # (fritexten i polish_prompt ovan; bakåtkompatibelt förval). Ett namn som
+    # inte längre finns i biblioteket faller tillbaka på fritexten.
+    "polish_template": "",
     # "builtin" = inbyggd motor (llama.cpp, laddas ner via Inställningar).
     # "ollama" = återanvänd en körande Ollama och dess modeller — inget
     # extra laddas ner.

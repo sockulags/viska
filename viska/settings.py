@@ -1,5 +1,6 @@
 """Inställningsfönster med flikar: Allmänt (klarspråk för vardagsbruk),
-Ordlista (global + per app), Avancerat (råa tekniska värden).
+Ordlista (global + per app), Polering (poleringsmotor, global standard,
+mallbibliotek och flow) och Avancerat (råa tekniska värden).
 
 Skapas och används enbart i huvudtråden — trayn begär öppning via App:s
 UI-kö. Alla färger går via viska.ui: inget får ärva klassiska
@@ -11,7 +12,7 @@ import queue
 import tkinter as tk
 from tkinter import ttk
 
-from viska import autostart, ui
+from viska import autostart, llm, ui
 from viska.config import CONFIG_PATH, LOG_PATH
 from viska.focus import visible_apps
 from viska.hotkey import HotkeyError, parse_hotkey
@@ -32,6 +33,12 @@ QUALITY = {
 _LIVE_CHOICES = {"Auto (på med GPU)": "auto", "På": True, "Av": False}
 _INJECT_CHOICES = {"Klistra in (standard)": "paste", "Skriv tecken för tecken": "type"}
 _PROFILE_LANG = {"Samma som aktivt": None, "Svenska": "sv", "Engelska": "en"}
+
+# Poleringsväljarnas specialval (utöver mallnamnen i biblioteket). En app-profil
+# kan ärva den globala standarden; den globala standarden själv kan inte det, så
+# "Global standard" finns bara i per-app-väljaren.
+_GLOBAL_STANDARD = "Global standard"
+_OWN_TEXT = "Egen text"
 
 # Tkinter-keysym → vårt tangentnamn (hotkey.parse_hotkey-format).
 _KEYSYMS = {
@@ -139,10 +146,22 @@ class SettingsWindow:
         self._pal = ui.setup_window(self.win)
         pal = self._pal
 
+        # Arbetskopia av mallbiblioteket, rensad från trasiga poster. Både den
+        # globala väljaren och per-app-väljaren läser namnen härifrån, och
+        # bibliotekseditorn nedan muterar listan — allt sparas via values().
+        self._templates = [dict(t) for t in llm.polish_templates(cfg)]
+        self._selected_template: str | None = None
+        # Skapas här (delas av Polering- och Ordlista-flikarna) i stället för i
+        # en flik, så per-app-editorns ärv-logik alltid har den globala flaggan.
+        self._flow = tk.BooleanVar(value=bool(cfg["flow"]))
+
         notebook = ttk.Notebook(self.win)
         notebook.pack(fill="both", expand=True, padx=12, pady=(12, 0))
+        # Ordningen på add-anropen sätter flikordningen: Polering ligger mellan
+        # Ordlista och Avancerat.
         general = self._tab(notebook, " Allmänt ")
         wordlist = self._tab(notebook, " Ordlista ")
+        polishing = self._tab(notebook, " Polering ")
         advanced = self._tab(notebook, " Avancerat ")
 
         # ---- Allmänt --------------------------------------------------------
@@ -216,42 +235,11 @@ class SettingsWindow:
         if gpu_panel is not None:
             ui.section(general, "GPU-stöd")
             _ActionPanel(general, self.win, gpu_panel)
-        # Flow-läge (global standard). Var:n skapas alltid så att befintlig
-        # config bevaras vid spara; kryssrutan visas när poleringen är
-        # nedladdad eller när flaggan redan är på (så en kvarglömd flagga går
-        # att stänga av), annars en hjälptext i stället för en död kryssruta.
-        self._flow = tk.BooleanVar(value=bool(cfg["flow"]))
-        if polish_panel is not None:
-            ui.section(general, "Polering (AI)")
-            self._hint(
-                general,
-                "Markera text var som helst, tryck tangenten, få den omskriven "
-                "lokalt. Uppgift per app ställs in under Ordlista.",
-            )
-            _ActionPanel(general, self.win, polish_panel)
-            # Kryssrutan visas när poleringen är nedladdad ELLER när flaggan
-            # redan är på: annars går en kvarglömd flow-flagga (efter t.ex.
-            # "Ta bort poleringen") inte att stänga av härifrån.
-            if polish_ready or bool(cfg["flow"]):
-                holder = self._row(
-                    general,
-                    "Flow-läge (alla appar)",
-                    hint="Polera dikteringen automatiskt innan den skrivs in",
-                )
-                ttk.Checkbutton(holder, variable=self._flow).pack()
-                if not polish_ready:
-                    self._hint(
-                        general,
-                        "Poleringen är inte nedladdad – flow-läget gör inget "
-                        "(dikteringen skrivs in som vanligt) tills du laddar "
-                        "ner den ovan.",
-                    )
-            else:
-                self._hint(
-                    general,
-                    "Flow-läge (automatisk polering av dikteringen) blir "
-                    "tillgängligt när poleringen laddats ner ovan.",
-                )
+
+        # ---- Polering -------------------------------------------------------
+        # Allt poleringsrelaterat samlat: motorstatus/nedladdning, global
+        # standard, mallbibliotek, globalt flow och en översikt.
+        self._build_polishing_tab(polishing, cfg, polish_panel, polish_ready)
 
         # ---- Ordlista -------------------------------------------------------
 
@@ -303,11 +291,31 @@ class SettingsWindow:
             holder, textvariable=self._profile_lang,
             values=list(_PROFILE_LANG), state="readonly", width=_FIELD_W - 2,
         ).pack()
+        # Poleringsuppgift för appen: Global standard (ärv), en mall ur
+        # biblioteket eller Egen text (fritext, dagens polish_prompt). Combobox
+        # + textfält som bara visas för Egen text. Samma bibliotek som den
+        # globala väljaren i Polering-fliken.
+        polish_box = tk.Frame(wordlist, bg=pal["window"])
+        polish_box.pack(fill="x")
+        self._profile_polish_choice = tk.StringVar(value=_GLOBAL_STANDARD)
         holder = self._row(
-            wordlist, "Poleringsprompt", hint="T.ex. \"omforma till artigt mejl\""
+            polish_box, "Polering", hint="Uppgift när appens text poleras"
         )
-        self._profile_polish = ui.themed_text(holder, width=32, height=2, wrap="word")
-        self._profile_polish.pack()
+        self._profile_polish_combo = ttk.Combobox(
+            holder,
+            textvariable=self._profile_polish_choice,
+            values=[_GLOBAL_STANDARD] + self._template_names() + [_OWN_TEXT],
+            state="readonly",
+            width=_FIELD_W - 2,
+        )
+        self._profile_polish_combo.pack()
+        self._profile_polish_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: self._toggle_profile_polish_text()
+        )
+        self._profile_polish = ui.themed_text(
+            polish_box, width=54, height=2, wrap="word"
+        )
+        # Packas först när Egen text väljs (_toggle_profile_polish_text).
         # Flow-läge per app. Var:n skapas alltid (och laddas/sparas) så att en
         # befintlig profil behåller sitt flow-val även när kryssrutan är dold.
         # Startvärdet är den globala standarden: en profil utan eget val ärver
@@ -346,16 +354,6 @@ class SettingsWindow:
             "Säg \"ny rad\" eller \"nytt stycke\" så skrivs radbrytning i stället.\n"
             "Fraserna redigeras under voice_commands i config-filen.",
         )
-
-        ui.section(wordlist, "Poleringsprompt (global)")
-        self._hint(
-            wordlist,
-            "Uppgift när markerad text poleras. Tom = \"skriv om till korrekt, "
-            "naturlig text\". Per app: fältet i profilredigeraren ovan.",
-        )
-        self._polish_prompt = ui.themed_text(wordlist, width=54, height=2, wrap="word")
-        self._polish_prompt.pack(fill="x", pady=(4, 2))
-        self._polish_prompt.insert("1.0", cfg["polish_prompt"])
 
         # ---- Avancerat ------------------------------------------------------
 
@@ -535,6 +533,7 @@ class SettingsWindow:
         self._app_list.delete(0, "end")
         for app in sorted(self._profiles):
             self._app_list.insert("end", app)
+        self._refresh_polish_overview()
 
     def _on_profile_select(self, _event) -> None:
         selection = self._app_list.curselection()
@@ -557,8 +556,19 @@ class SettingsWindow:
                 lang, "Samma som aktivt"
             )
         )
+        # Poleringsval: mall (om den finns kvar), Egen text (fritext) eller
+        # Global standard (ärv). En pekare till en raderad mall visas som
+        # Global standard — samma effektiva beteende som upplösningen ger.
+        tmpl = (profile.get("polish_template") or "").strip()
         self._profile_polish.delete("1.0", "end")
-        self._profile_polish.insert("1.0", profile.get("polish_prompt", ""))
+        if tmpl and tmpl in self._template_names():
+            self._profile_polish_choice.set(tmpl)
+        elif profile.get("polish_prompt"):
+            self._profile_polish_choice.set(_OWN_TEXT)
+            self._profile_polish.insert("1.0", profile["polish_prompt"])
+        else:
+            self._profile_polish_choice.set(_GLOBAL_STANDARD)
+        self._toggle_profile_polish_text()
         # Visa det effektiva läget: en profil utan eget flow-val ärver den
         # globala standarden (samma väg som _on_start väljer). Då speglar
         # kryssrutan vad som faktiskt händer, och att bocka bort den blir ett
@@ -570,6 +580,8 @@ class SettingsWindow:
         self._profile_app.set("")
         self._profile_prompt.delete("1.0", "end")
         self._profile_polish.delete("1.0", "end")
+        self._profile_polish_choice.set(_GLOBAL_STANDARD)
+        self._toggle_profile_polish_text()
         self._profile_inject.set(list(_INJECT_CHOICES)[0])
         self._profile_lang.set(list(_PROFILE_LANG)[0])
         # Ny profil ärver den globala standarden tills användaren avviker.
@@ -586,9 +598,17 @@ class SettingsWindow:
         prompt = self._profile_prompt.get("1.0", "end").strip()
         if prompt:
             profile["initial_prompt"] = prompt
-        polish = self._profile_polish.get("1.0", "end").strip()
-        if polish:
-            profile["polish_prompt"] = polish
+        # Poleringsval: skriv exakt en nyckel (eller ingen). Global standard =
+        # ingen nyckel (ärver global, bakåtkompatibelt). Egen text = fritext i
+        # polish_prompt. En mall = polish_template. Tom Egen text faller till
+        # Global standard.
+        choice = self._profile_polish_choice.get()
+        if choice == _OWN_TEXT:
+            polish = self._profile_polish.get("1.0", "end").strip()
+            if polish:
+                profile["polish_prompt"] = polish
+        elif choice != _GLOBAL_STANDARD:
+            profile["polish_template"] = choice
         inject = _INJECT_CHOICES[self._profile_inject.get()]
         if inject != "paste":
             profile["inject_mode"] = inject
@@ -616,6 +636,260 @@ class SettingsWindow:
             self._profiles.pop(self._app_list.get(selection[0]), None)
             self._refresh_profile_list()
 
+    # -- Polering-fliken -----------------------------------------------------------
+
+    def _template_names(self) -> list[str]:
+        return [t["namn"] for t in self._templates]
+
+    def _build_polishing_tab(self, parent, cfg, polish_panel, polish_ready) -> None:
+        """Samlar allt poleringsrelaterat: motorstatus/nedladdning, global
+        standard (mall/Egen text), globalt flow, mallbiblioteket och en
+        översikt över appar med egen polering."""
+        pal = self._pal
+
+        # -- Motor: status, nedladdning, "Ta bort poleringen" ------------------
+        if polish_panel is not None:
+            ui.section(parent, "Poleringsmotor")
+            self._hint(
+                parent,
+                "Markera text var som helst, tryck tangenten, få den omskriven "
+                "lokalt. Toner för en enskild polering väljs med dubbeltryck.",
+            )
+            _ActionPanel(parent, self.win, polish_panel)
+
+        # -- Global standard: mall eller Egen text -----------------------------
+        ui.section(parent, "Global standard")
+        self._hint(
+            parent,
+            "Poleringsuppgiften som gäller överallt utom där en app har en egen "
+            "(under Ordlista). Välj en mall ur biblioteket eller Egen text.",
+        )
+        names = self._template_names()
+        stored = (cfg.get("polish_template") or "").strip()
+        initial = stored if stored in names else _OWN_TEXT
+        self._global_polish_choice = tk.StringVar(value=initial)
+        gbox = tk.Frame(parent, bg=pal["window"])
+        gbox.pack(fill="x", pady=(2, 0))
+        self._global_polish_combo = ttk.Combobox(
+            gbox,
+            textvariable=self._global_polish_choice,
+            values=[_OWN_TEXT] + names,
+            state="readonly",
+            width=_FIELD_W - 2,
+        )
+        self._global_polish_combo.pack(anchor="w")
+        self._global_polish_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: self._toggle_global_polish_text()
+        )
+        self._polish_prompt = ui.themed_text(gbox, width=54, height=2, wrap="word")
+        self._polish_prompt.insert("1.0", cfg["polish_prompt"])
+        self._toggle_global_polish_text()  # visar textfältet bara för Egen text
+
+        # -- Flow-läge (global) -----------------------------------------------
+        # Kryssrutan visas när poleringen är nedladdad ELLER när flaggan redan
+        # är på (så en kvarglömd flagga går att stänga av), annars en hjälptext.
+        ui.section(parent, "Flow-läge")
+        if polish_ready or bool(cfg["flow"]):
+            holder = self._row(
+                parent,
+                "Flow-läge (alla appar)",
+                hint="Polera dikteringen automatiskt innan den skrivs in",
+            )
+            ttk.Checkbutton(holder, variable=self._flow).pack()
+            if not polish_ready:
+                self._hint(
+                    parent,
+                    "Poleringen är inte nedladdad – flow-läget gör inget "
+                    "(dikteringen skrivs in som vanligt) tills du laddar ner "
+                    "den ovan.",
+                )
+        else:
+            self._hint(
+                parent,
+                "Flow-läge (automatisk polering av dikteringen) blir "
+                "tillgängligt när poleringen laddats ner ovan.",
+            )
+
+        # -- Mallbibliotek -----------------------------------------------------
+        ui.section(parent, "Mallbibliotek")
+        self._hint(
+            parent,
+            "Mallar som global standard och app-profiler pekar på. Ändras en "
+            "mall slår det igenom överallt där den används.",
+        )
+        picker = tk.Frame(parent, bg=pal["window"])
+        picker.pack(fill="x", pady=(4, 0))
+        self._template_list = ui.themed_listbox(
+            picker, height=5, exportselection=False
+        )
+        self._template_list.pack(side="left", fill="both", expand=True)
+        self._template_list.bind("<<ListboxSelect>>", self._on_template_select)
+        tbtns = tk.Frame(picker, bg=pal["window"])
+        tbtns.pack(side="left", fill="y", padx=(8, 0))
+        ttk.Button(tbtns, text="Ny…", width=12, command=self._new_template).pack(
+            pady=2
+        )
+        ttk.Button(
+            tbtns, text="Ta bort", width=12, command=self._remove_template
+        ).pack(pady=2)
+        self._template_name = tk.StringVar()
+        holder = self._row(parent, "Mallens namn")
+        self._template_name_entry = ttk.Entry(
+            holder, textvariable=self._template_name, width=_FIELD_W
+        )
+        self._template_name_entry.pack()
+        holder = self._row(parent, "Mallens prompt")
+        self._template_prompt = ui.themed_text(
+            holder, width=32, height=3, wrap="word"
+        )
+        self._template_prompt.pack()
+        ttk.Button(
+            parent, text="Spara mall", command=self._save_template
+        ).pack(anchor="e", pady=(6, 0))
+        self._refresh_template_list()
+
+        # -- Översikt: appar med egen polering/flow ----------------------------
+        ui.section(parent, "Appar med egen polering")
+        self._polish_overview = tk.Label(
+            parent, text="", bg=pal["window"], fg=pal["muted"],
+            font=("Segoe UI", 8), anchor="w", justify="left",
+        )
+        self._polish_overview.pack(fill="x")
+        self._refresh_polish_overview()
+
+    def _toggle_global_polish_text(self) -> None:
+        if self._global_polish_choice.get() == _OWN_TEXT:
+            self._polish_prompt.pack(fill="x", pady=(4, 2))
+        else:
+            self._polish_prompt.pack_forget()
+
+    def _toggle_profile_polish_text(self) -> None:
+        if self._profile_polish_choice.get() == _OWN_TEXT:
+            self._profile_polish.pack(fill="x", pady=(2, 0))
+        else:
+            self._profile_polish.pack_forget()
+
+    def _refresh_polish_choices(self) -> None:
+        """Uppdaterar båda poleringsväljarnas mallnamn efter en biblioteks-
+        ändring och lagar val som pekar på en mall som just försvann."""
+        names = self._template_names()
+        self._global_polish_combo.config(values=[_OWN_TEXT] + names)
+        if self._global_polish_choice.get() not in ([_OWN_TEXT] + names):
+            self._global_polish_choice.set(_OWN_TEXT)
+        self._toggle_global_polish_text()
+        self._profile_polish_combo.config(
+            values=[_GLOBAL_STANDARD] + names + [_OWN_TEXT]
+        )
+        if self._profile_polish_choice.get() not in (
+            [_GLOBAL_STANDARD, _OWN_TEXT] + names
+        ):
+            self._profile_polish_choice.set(_GLOBAL_STANDARD)
+        self._toggle_profile_polish_text()
+
+    def _refresh_template_list(self) -> None:
+        self._template_list.delete(0, "end")
+        for name in self._template_names():
+            self._template_list.insert("end", name)
+
+    def _on_template_select(self, _event) -> None:
+        selection = self._template_list.curselection()
+        if not selection:
+            return
+        name = self._template_list.get(selection[0])
+        tmpl = next((t for t in self._templates if t["namn"] == name), None)
+        if tmpl is None:
+            return
+        self._selected_template = name
+        self._template_name.set(tmpl["namn"])
+        self._template_prompt.delete("1.0", "end")
+        self._template_prompt.insert("1.0", tmpl.get("prompt", ""))
+
+    def _new_template(self) -> None:
+        self._selected_template = None
+        self._template_name.set("")
+        self._template_prompt.delete("1.0", "end")
+        self._template_name_entry.focus_set()
+
+    def _save_template(self) -> None:
+        name = self._template_name.get().strip()
+        if not name:
+            self._error.config(text="Ge mallen ett namn.")
+            return
+        if name in (_GLOBAL_STANDARD, _OWN_TEXT):
+            self._error.config(
+                text=f"\"{name}\" är reserverat – välj ett annat namn."
+            )
+            return
+        if name in self._template_names() and name != self._selected_template:
+            self._error.config(text=f"En mall med namnet \"{name}\" finns redan.")
+            return
+        prompt = self._template_prompt.get("1.0", "end").strip()
+        old = self._selected_template
+        if old is not None:
+            for t in self._templates:
+                if t["namn"] == old:
+                    t["namn"] = name
+                    t["prompt"] = prompt
+                    break
+            if old != name:
+                self._rename_template_refs(old, name)
+        else:
+            self._templates.append({"namn": name, "prompt": prompt})
+        self._selected_template = name
+        self._error.config(text="")
+        self._refresh_template_list()
+        self._refresh_polish_choices()
+        self._refresh_polish_overview()
+
+    def _remove_template(self) -> None:
+        selection = self._template_list.curselection()
+        if not selection:
+            return
+        name = self._template_list.get(selection[0])
+        self._templates = [t for t in self._templates if t["namn"] != name]
+        if self._selected_template == name:
+            self._selected_template = None
+            self._template_name.set("")
+            self._template_prompt.delete("1.0", "end")
+        self._refresh_template_list()
+        self._refresh_polish_choices()
+        self._refresh_polish_overview()
+
+    def _rename_template_refs(self, old: str, new: str) -> None:
+        """Följ med pekare vid namnbyte så de inte tyst faller tillbaka på
+        global standard: den globala väljaren, öppen profil och alla sparade
+        profiler som pekade på den gamla mallen."""
+        if self._global_polish_choice.get() == old:
+            self._global_polish_choice.set(new)
+        if self._profile_polish_choice.get() == old:
+            self._profile_polish_choice.set(new)
+        for prof in self._profiles.values():
+            if prof.get("polish_template") == old:
+                prof["polish_template"] = new
+
+    def _refresh_polish_overview(self) -> None:
+        if not hasattr(self, "_polish_overview"):
+            return
+        names = self._template_names()
+        lines = []
+        for app in sorted(self._profiles):
+            prof = self._profiles[app]
+            parts = []
+            tmpl = (prof.get("polish_template") or "").strip()
+            if tmpl:
+                parts.append(
+                    f"mall: {tmpl}" if tmpl in names else "mall saknas → global"
+                )
+            elif prof.get("polish_prompt"):
+                parts.append("egen text")
+            if "flow" in prof:
+                parts.append("flow på" if prof.get("flow") else "flow av")
+            if parts:
+                lines.append(f"{app} – {' · '.join(parts)}")
+        self._polish_overview.config(
+            text="\n".join(lines) if lines else "Inga appar har egen polering ännu."
+        )
+
     # -- Spara --------------------------------------------------------------------
 
     def values(self) -> dict:
@@ -627,7 +901,17 @@ class SettingsWindow:
             "live": _LIVE_CHOICES[self._live.get()],
             "sounds": self._sounds.get(),
             "initial_prompt": self._prompt.get("1.0", "end").strip(),
+            # polish_prompt är den globala Egen text-fritexten; den sparas alltid
+            # (även när en mall är vald) så texten finns kvar om man byter
+            # tillbaka. Upplösningen använder den bara när polish_template är tom.
             "polish_prompt": self._polish_prompt.get("1.0", "end").strip(),
+            "polish_templates": [dict(t) for t in self._templates],
+            # Global standard pekar på en mall, eller "" = Egen text.
+            "polish_template": (
+                self._global_polish_choice.get()
+                if self._global_polish_choice.get() in self._template_names()
+                else ""
+            ),
             "flow": self._flow.get(),
             "app_profiles": dict(self._profiles),
             "inject_mode": _INJECT_CHOICES[self._inject.get()],
@@ -671,10 +955,12 @@ class SettingsWindow:
         return changes
 
     def _save(self) -> None:
-        # Har användaren fyllt i profilredigeraren utan att klicka "Spara
-        # profil" ska det inte tyst kastas bort.
+        # Har användaren fyllt i profil- eller mallredigeraren utan att klicka
+        # "Spara" i respektive ruta ska det inte tyst kastas bort.
         if self._profile_app.get().strip():
             self._save_profile()
+        if self._template_name.get().strip():
+            self._save_template()
         try:
             changes = self.values()
         except ValueError as e:

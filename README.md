@@ -52,16 +52,17 @@ historik (senaste dikteringarna, klicka för att kopiera — hålls i RAM som
 standard, se Integritet), växla svenska/engelska, byta mikrofon, avsluta.
 Finns en ny version på GitHub visas en hämta-rad överst.
 
-**Inställningarna** har tre flikar: *Allmänt* (språk, tangent med
+**Inställningarna** har fyra flikar: *Allmänt* (språk, tangent med
 tryck-för-att-välja, livekänsla Lugn/Normal/Snabb, kvalitet i klartext,
-GPU-stöd), *Ordlista* (global + per app) och *Avancerat* (råa tekniska
-värden för den som vill).
+GPU-stöd), *Ordlista* (global ordlista + per app-profiler), *Polering*
+(poleringsmotor, global standard, mallbibliotek och flow) och *Avancerat*
+(råa tekniska värden för den som vill).
 
 **Ordlista:** skriv in namn och facktermer (t.ex. "Avanza, Smask") så
 stavar modellen dem rätt. **Per app-profiler:** ge en app egen extra
-ordlista, eget inskrivningssätt (t.ex. tecken för tecken i terminaler)
-och — om du uttryckligen väljer det — eget språk. Språk byts aldrig
-automatiskt.
+ordlista, eget inskrivningssätt (t.ex. tecken för tecken i terminaler),
+egen poleringsuppgift (en mall eller egen text) och — om du uttryckligen
+väljer det — eget språk. Språk byts aldrig automatiskt.
 
 **Röstkommandon:** säg "ny rad" eller "nytt stycke" (engelska: "new
 line", "new paragraph") så skrivs radbrytning i stället för orden.
@@ -76,10 +77,19 @@ rad för att stänga av den. Obs: radbrytningar i terminaler kan trigga
 
 Markera text **var som helst** (även sånt du inte dikterat), tryck
 **F8**, och texten skrivs om av en lokal språkmodell: utfyllnadsord
-bort, grammatik rättad, innebörd bevarad. Med en **poleringsprompt per
-app** blir det riktigt användbart — Outlook-profilen kan säga "omforma
-till ett komplett artigt mejl från Lucas" medan kodredigeraren får
-"gör om till koncis commit-text".
+bort, grammatik rättad, innebörd bevarad.
+
+Vad poleringen ska *göra* styrs av en **poleringsuppgift**. Under
+Inställningar → Polering finns ett **mallbibliotek** med färdiga mallar
+(Mejl, Commit-text, Chattsvar, Formell text, Kortfattat) som går att
+redigera, ta bort eller komplettera med egna. Både den **globala
+standarden** och varje **app-profil** (Ordlista-fliken) pekar antingen på
+en mall eller på **Egen text** (egen fritext). Ändrar du en mall slår det
+igenom överallt där den används; en app-profil kan dessutom ärva den
+globala standarden. Så kan Outlook-profilen peka på mallen "Mejl" medan
+kodredigeraren pekar på "Commit-text" — och båda uppdateras samtidigt om
+du finslipar mallen. (Pekar en profil på en mall du senare raderar faller
+den tillbaka på den globala standarden.)
 
 **Välj ton för en enskild polering:** tryck **F8 två gånger snabbt** så
 dyker en liten meny upp vid pillen med *Appens standard* (förvald),
@@ -102,10 +112,10 @@ igenom innan du skickar något viktigt. Modellen byts under
 **Flow-läge** kör samma polering på *dikteringen* i stället för markerad
 text: talet skrivs inte in medan du pratar (pillen förhandsvisar det
 bara), och när du stoppar poleras hela transkriptet automatiskt och
-skrivs in på en gång — precis som Wispr Flow. Slå på det globalt eller per
-app i Inställningar (kryssrutan visas när poleringen är nedladdad); en
-app-profil kan kombinera flow med sin egen poleringsprompt, t.ex. "omforma
-till ett artigt mejl". Skulle poleringen vara otillgänglig, krångla eller
+skrivs in på en gång — precis som Wispr Flow. Slå på det globalt under
+Inställningar → Polering eller per app i Ordlista-profilen (kryssrutan visas
+när poleringen är nedladdad); en app-profil kan kombinera flow med sin egen
+poleringsuppgift, t.ex. mallen "Mejl". Skulle poleringen vara otillgänglig, krångla eller
 ta för lång tid skrivs råtexten in precis som vanligt — dikteringen går
 aldrig förlorad. Både rå- och den polerade versionen hamnar i historiken
 (råtexten går att hämta i traymenyn).
@@ -149,6 +159,10 @@ efter ändringar):
 | `sounds` | `true` | Pip vid start/stopp |
 | `history_size` | `20` | Antal dikteringar i traymenyns historik |
 | `history_persist` | `false` | Spara historiken till `history.json` (se Integritet) i stället för bara RAM |
+| `polish_prompt` | `""` | Global poleringsuppgift som "Egen text"; används när `polish_template` är tom |
+| `polish_template` | `""` | Namn på mallen i `polish_templates` som global standard pekar på (tom = Egen text) |
+| `polish_templates` | *(5 mallar)* | Mallbiblioteket (`{namn, prompt}`); hanteras enklast i Inställningar → Polering |
+| `flow` | `false` | Flow-läge globalt: polera hela dikteringen automatiskt före inskrivning |
 
 ## Autostart
 
