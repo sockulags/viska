@@ -114,8 +114,11 @@ class SettingsWindow:
     ):
         """on_save(ändringar: dict) -> None | str (fel visas, fönstret kvar).
         Panelerna kommer från App._gpu_panel()/_polish_panel().
-        polish_ready: True när poleringen är nedladdad/nåbar – annars visas
-        en hjälptext i stället för flow-lägets (döda) kryssrutor."""
+        polish_ready: True när poleringen är nedladdad/nåbar. Är den inte det
+        visas en hjälptext i stället för flow-lägets kryssrutor — men bara när
+        flow faktiskt är avslaget. Är en kvarglömd flow-flagga på (t.ex. efter
+        att poleringen tagits bort) visas kryssrutan ändå, så att den går att
+        stänga av utan att handredigera config."""
         ui.refresh_theme()
         self._on_save = on_save
         self._polish_ready = polish_ready
@@ -214,8 +217,9 @@ class SettingsWindow:
             ui.section(general, "GPU-stöd")
             _ActionPanel(general, self.win, gpu_panel)
         # Flow-läge (global standard). Var:n skapas alltid så att befintlig
-        # config bevaras vid spara; kryssrutan visas bara när poleringen är
-        # nedladdad, annars en hjälptext (ingen död kryssruta).
+        # config bevaras vid spara; kryssrutan visas när poleringen är
+        # nedladdad eller när flaggan redan är på (så en kvarglömd flagga går
+        # att stänga av), annars en hjälptext i stället för en död kryssruta.
         self._flow = tk.BooleanVar(value=bool(cfg["flow"]))
         if polish_panel is not None:
             ui.section(general, "Polering (AI)")
@@ -225,13 +229,23 @@ class SettingsWindow:
                 "lokalt. Uppgift per app ställs in under Ordlista.",
             )
             _ActionPanel(general, self.win, polish_panel)
-            if polish_ready:
+            # Kryssrutan visas när poleringen är nedladdad ELLER när flaggan
+            # redan är på: annars går en kvarglömd flow-flagga (efter t.ex.
+            # "Ta bort poleringen") inte att stänga av härifrån.
+            if polish_ready or bool(cfg["flow"]):
                 holder = self._row(
                     general,
                     "Flow-läge (alla appar)",
                     hint="Polera dikteringen automatiskt innan den skrivs in",
                 )
                 ttk.Checkbutton(holder, variable=self._flow).pack()
+                if not polish_ready:
+                    self._hint(
+                        general,
+                        "Poleringen är inte nedladdad – flow-läget gör inget "
+                        "(dikteringen skrivs in som vanligt) tills du laddar "
+                        "ner den ovan.",
+                    )
             else:
                 self._hint(
                     general,
@@ -295,14 +309,23 @@ class SettingsWindow:
         self._profile_polish = ui.themed_text(holder, width=32, height=2, wrap="word")
         self._profile_polish.pack()
         # Flow-läge per app. Var:n skapas alltid (och laddas/sparas) så att en
-        # befintlig profil behåller sitt flow-val även när kryssrutan är dold;
-        # den visas bara när poleringen är nedladdad.
+        # befintlig profil behåller sitt flow-val även när kryssrutan är dold.
         self._profile_flow = tk.BooleanVar(value=False)
-        if polish_ready:
+        # Visa kryssrutan när poleringen är nedladdad ELLER när någon profil
+        # redan har flow på: annars går en kvarglömd flow-flagga i en profil
+        # (efter t.ex. "Ta bort poleringen") inte att stänga av härifrån.
+        any_profile_flow = any(p.get("flow") for p in self._profiles.values())
+        if polish_ready or any_profile_flow:
             holder = self._row(
                 wordlist, "Flow-läge", hint="Polera dikteringen automatiskt"
             )
             ttk.Checkbutton(holder, variable=self._profile_flow).pack()
+            if not polish_ready:
+                self._hint(
+                    wordlist,
+                    "Poleringen är inte nedladdad – flow-läget gör inget "
+                    "tills den laddats ner.",
+                )
         else:
             self._hint(
                 wordlist,

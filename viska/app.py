@@ -92,6 +92,12 @@ class App:
         # instansiera Polisher samtidigt.
         self._polisher_lock = threading.Lock()
         self._polishing = threading.Event()
+        # Serialiserar flow-lägets polering+inskrivning mot övrig inskrivning:
+        # bevarar ordningen och skyddar klippbordet när en flow-session ännu
+        # inte hunnit skriva in medan nästa diktering redan är klar. Tas alltid
+        # INNAN _transcribing släpps (se _run_flow) så det aldrig kan finnas
+        # mer än en väntande session. Ledigt när flow inte används.
+        self._flow_lock = threading.Lock()
         self.polish_key: ActionKey | None = None
         try:
             self.polish_key = ActionKey(cfg["polish_hotkey"], self._on_polish_key)
@@ -248,8 +254,16 @@ class App:
             )
             # Flow: polera automatiskt? Profilen ärver den globala standarden.
             # Poleringsuppgiften är appens egen, annars den globala — samma
-            # väg som F8-flödet väljer stil.
-            self._session_flow = bool(profile.get("flow", self.cfg["flow"]))
+            # väg som F8-flödet väljer stil. Är poleringen inte tillgänglig
+            # (ej nedladdad, backend nere) körs sessionen som VANLIG diktering
+            # med liveinskrivning i stället — annars skulle en kvarglömd flow-
+            # flagga (t.ex. efter "Ta bort poleringen") tyst stänga av live och
+            # falla tillbaka på råtext varje gång. installed() anropas bara när
+            # flaggan faktiskt är på (kortsluter), så vanlig diktering utan flow
+            # betalar inget för kontrollen.
+            self._session_flow = bool(
+                profile.get("flow", self.cfg["flow"])
+            ) and llm.installed(self.cfg)
             self._session_polish_prompt = (
                 profile.get("polish_prompt") or self.cfg["polish_prompt"]
             )
@@ -386,7 +400,11 @@ class App:
             if flow and text:
                 # Flow-läge: polera hela transkriptet innan inskrivning.
                 # live_texts är alltid tomt här (preview_only committar aldrig).
-                self._finish_flow(text, inject_mode, polish_prompt)
+                # _run_flow släpper _transcribing så snart flow-låset tagits, så
+                # poleringen (upp till FLOW_POLISH_TIMEOUT_S) aldrig blockerar
+                # nästa inspelning — till skillnad från om _finish_flow körts
+                # synkront här med _transcribing kvar satt hela vägen till inject.
+                self._run_flow(text, inject_mode, polish_prompt)
                 return
             if live_texts or text:
                 self.last_text = " ".join([*live_texts, text]).strip()
@@ -402,7 +420,12 @@ class App:
                 return
             if self.cfg["append_space"] and not text.endswith("\n"):
                 text += " "
-            inject(text, inject_mode, self.cfg["restore_clipboard"])
+            # Flow-låset serialiserar inskrivningen mot en ev. pågående flow-
+            # polering: ordningen bevaras och klippbordet krockar inte om en
+            # föregående flow-session ännu inte hunnit skriva in. Utan flow är
+            # låset alltid ledigt och beteendet är oförändrat.
+            with self._flow_lock:
+                inject(text, inject_mode, self.cfg["restore_clipboard"])
             self.overlay.hide()
         except Exception:
             log.exception("Transkriberingen misslyckades")
@@ -414,6 +437,19 @@ class App:
             self._transcribing.clear()
 
     # -- Flow-läge (automatisk polering före inskrivning) ---------------------------
+
+    def _run_flow(self, raw: str, inject_mode: str, polish_prompt: str) -> None:
+        """Kör flow-poleringen serialiserat men utan att blockera nästa
+        diktering. Tar först flow-låset (bevarar ordningen mot en föregående
+        flow-session som ännu inte skrivit in) och släpper därefter
+        _transcribing — då kan en ny inspelning starta medan poleringen pågår
+        i bakgrunden. Att låset tas INNAN _transcribing släpps gör att en
+        väntande session behåller _transcribing och därmed spärrar alla andra:
+        det finns aldrig mer än en väntare på låset, så inskrivningarna sker i
+        tur och ordning."""
+        with self._flow_lock:
+            self._transcribing.clear()
+            self._finish_flow(raw, inject_mode, polish_prompt)
 
     def _finish_flow(self, raw: str, inject_mode: str, polish_prompt: str) -> None:
         """Polerar hela dikteringen och skriver in resultatet på en gång.
