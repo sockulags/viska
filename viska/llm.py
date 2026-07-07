@@ -288,10 +288,10 @@ def cleanup_pending_removal() -> None:
         _REMOVE_MARKER.unlink(missing_ok=True)
 
 
-# Fördefinierade toner för tonvalsmenyn (F8-dubbeltryck). Uppgiften
-# formuleras på aktivt språk så modellen bevarar det språket. Etiketterna
-# är alltid svenska (appens språk); "Appens standard" läggs till av
-# anroparen och använder appens egen polish_prompt.
+# Inbyggda reservtoner för tonvalsmenyn (F8-dubbeltryck): används BARA när
+# mallbiblioteket (polish_templates) är tomt. Normalt visar menyn i stället
+# "Appens standard" följt av användarens mallar. Uppgiften formuleras på
+# aktivt språk så modellen bevarar det; etiketterna är alltid svenska.
 _TONE_PRESETS = {
     "sv": [
         ("Neutral", "Skriv om texten till korrekt, naturlig text med samma innebörd och ton."),
@@ -309,7 +309,8 @@ _TONE_PRESETS = {
 
 
 def tone_presets(lang: str) -> list[tuple[str, str]]:
-    """Toner (etikett, uppgift) för tonvalsmenyn på aktivt språk."""
+    """Inbyggda reservtoner (etikett, uppgift) på aktivt språk — fallback för
+    tonvalsmenyn när mallbiblioteket är tomt."""
     return _TONE_PRESETS.get(lang, _TONE_PRESETS["sv"])
 
 

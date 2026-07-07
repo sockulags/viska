@@ -14,6 +14,7 @@ Två egenheter att känna till:
 import ctypes
 import queue
 import tkinter as tk
+from tkinter import ttk
 
 from viska import ui
 
@@ -32,6 +33,9 @@ _BARS = 5
 # stänga den) städas den bort av den här säkerhetstimern så inget topmost-
 # fönster kan bli kvarhängande.
 _TONE_MENU_TIMEOUT_MS = 6000
+# Fler tonval än så här och menyn börjar scrolla i stället för att växa förbi
+# skärmkanten (mallbiblioteket kan bli långt).
+_MAX_MENU_ROWS = 8
 
 RED = "#c0392b"
 BLUE = "#2980b9"
@@ -233,11 +237,12 @@ class ToneMenu:
             padx=10,
             pady=2,
         ).pack(fill="x", pady=(2, 6))
-        for label, style, is_default in options:
+
+        def make_row(parent, label, style, is_default):
             base_bg = pal["surface"]
             base_fg = pal["accent"] if is_default else pal["text"]
             row = tk.Label(
-                frame,
+                parent,
                 text=("● " + label) if is_default else ("    " + label),
                 bg=base_bg,
                 fg=base_fg,
@@ -257,6 +262,40 @@ class ToneMenu:
                 lambda _e, r=row, b=base_bg, f=base_fg: r.config(bg=b, fg=f),
             )
             row.bind("<Button-1>", lambda _e, s=style: self._choose(s))
+            return row
+
+        scrolling = len(options) > _MAX_MENU_ROWS
+        if scrolling:
+            # Långt bibliotek: lägg raderna i en Canvas som kapas till
+            # _MAX_MENU_ROWS synliga rader; resten nås med mushjul eller
+            # rullningslist. Raderna byggs likadant, bara i en annan förälder.
+            canvas = tk.Canvas(frame, bg=pal["surface"], highlightthickness=0)
+            vbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=vbar.set)
+            # Rullningslisten först (side=right) så den aldrig kläms bort av
+            # canvasens expand.
+            vbar.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="both", expand=True)
+            rows = tk.Frame(canvas, bg=pal["surface"])
+            canvas.create_window((0, 0), window=rows, anchor="nw")
+            for label, style, is_default in options:
+                make_row(rows, label, style, is_default)
+            rows.update_idletasks()
+            row_h = max(1, rows.winfo_reqheight() // len(options))
+            canvas.configure(
+                width=rows.winfo_reqwidth(),
+                height=row_h * _MAX_MENU_ROWS,
+                scrollregion=(
+                    0, 0, rows.winfo_reqwidth(), rows.winfo_reqheight()
+                ),
+            )
+            win.bind(
+                "<MouseWheel>",
+                lambda e: canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"),
+            )
+        else:
+            for label, style, is_default in options:
+                make_row(frame, label, style, is_default)
         win.update_idletasks()
         w = win.winfo_reqwidth()
         h = win.winfo_reqheight()
@@ -266,12 +305,46 @@ class ToneMenu:
         win.geometry(f"+{(sw - w) // 2}+{sh - h - 130}")
         _round_corners(user32.GetParent(win.winfo_id()) or win.winfo_id())
         win.bind("<Escape>", lambda _e: self._close())
-        # Klick utanför menyn (den tappar då fokus) stänger den.
-        win.bind("<FocusOut>", lambda _e: self._close())
+        # Klick utanför menyn (den tappar då fokus) stänger den. I scroll-läget
+        # kan ett klick på rullningslisten flytta fokus till en delwidget utan
+        # att menyn lämnats — då avgör pekarens läge (se _on_focus_out).
+        if scrolling:
+            win.bind("<FocusOut>", self._on_focus_out)
+        else:
+            win.bind("<FocusOut>", lambda _e: self._close())
         win.deiconify()
         win.lift()
         win.focus_force()
         self._timeout_job = self._root.after(_TONE_MENU_TIMEOUT_MS, self._close)
+
+    def _on_focus_out(self, _event=None) -> None:
+        """Endast i scroll-läget: ett klick på rullningslisten flyttar fokus
+        till en delwidget och lämnar inte menyn. Skjut upp beslutet ett
+        ögonblick och stäng först om pekaren då ligger utanför menyn (ett
+        äkta klick utanför)."""
+        win = self._win
+        if win is None:
+            return
+
+        def check():
+            if self._win is not win:
+                return  # redan stängd eller ersatt
+            try:
+                px, py = win.winfo_pointerxy()
+                x0, y0 = win.winfo_rootx(), win.winfo_rooty()
+                inside = (
+                    x0 <= px <= x0 + win.winfo_width()
+                    and y0 <= py <= y0 + win.winfo_height()
+                )
+            except Exception:
+                inside = False
+            if not inside:
+                self._close()
+
+        try:
+            win.after(1, check)
+        except Exception:
+            self._close()
 
     def _choose(self, style) -> None:
         cb = self._on_choose

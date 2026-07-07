@@ -1013,13 +1013,20 @@ class App:
                     )
                     return
                 # Appens standard förmarkerad (style None = härleds i _do_polish,
-                # exakt som enkeltryck); sedan de fördefinierade tonerna på aktivt
-                # språk.
+                # exakt som enkeltryck); sedan mallbiblioteket i sin ordning som
+                # tonval. Är biblioteket tomt faller vi tillbaka på de inbyggda
+                # reservtonerna på aktivt språk.
                 label = "Appens standard" if app_default else "Standard (allmän)"
                 options = [(label, None, True)]
-                options += [
-                    (name, task, False) for name, task in llm.tone_presets(lang)
-                ]
+                templates = llm.polish_templates(self.cfg)
+                if templates:
+                    options += [
+                        (t["namn"], t["prompt"], False) for t in templates
+                    ]
+                else:
+                    options += [
+                        (name, task, False) for name, task in llm.tone_presets(lang)
+                    ]
 
                 def on_choose(style):
                     # Menyval: _polishing är redan satt (togs när menyn öppnades),

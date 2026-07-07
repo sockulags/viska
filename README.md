@@ -92,10 +92,9 @@ du finslipar mallen. (Pekar en profil på en mall du senare raderar faller
 den tillbaka på den globala standarden.)
 
 **Välj ton för en enskild polering:** tryck **F8 två gånger snabbt** så
-dyker en liten meny upp vid pillen med *Appens standard* (förvald),
-*Neutral*, *Mejl*, *Commit-text* och *Kortfattat*. Valet gäller bara den
-poleringen — inga inställningar ändras. Esc eller klick utanför stänger
-menyn.
+dyker en liten meny upp vid pillen med *Appens standard* (förvald) följd av
+mallarna ur mallbiblioteket. Valet gäller bara den poleringen — inga
+inställningar ändras. Esc eller klick utanför stänger menyn.
 
 Originaltexten läggs i historiken innan den ersätts, så en polering du
 inte gillar går att ångra: öppna traymenyns historik och klicka på
