@@ -64,7 +64,15 @@ DEFAULTS = {
     # Global uppgiftsbeskrivning (tom = "skriv om till korrekt text").
     # Per-app-varianter läggs i app_profiles som polish_prompt.
     "polish_prompt": "",
+    # "builtin" = inbyggd motor (llama.cpp, laddas ner via Inställningar).
+    # "ollama" = återanvänd en körande Ollama och dess modeller — inget
+    # extra laddas ner.
+    "polish_backend": "builtin",
+    "polish_ollama_model": "qwen3.5:9b",
+    "polish_ollama_url": "http://localhost:11434",
     "polish_model_repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+    # Filnamn i %APPDATA%\viska\llm — eller en absolut sökväg till en egen
+    # GGUF (t.ex. en Ollama-blob).
     "polish_model_file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
     # Dikteringshistorik i traymenyn (hålls enbart i RAM, aldrig på disk).
     "history_size": 20,

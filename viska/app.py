@@ -387,6 +387,18 @@ class App:
         if self._llm_busy.is_set():
             return {"state": "Åtgärd pågår…", "kind": "warn", "action": None}
         key = (self.cfg["polish_hotkey"] or "f8").upper()
+        if self.cfg["polish_backend"] == "ollama":
+            ok = llm.ollama_reachable(self.cfg)
+            model = self.cfg["polish_ollama_model"]
+            return {
+                "state": (
+                    f"via Ollama ({model}) – markera text och tryck {key}"
+                    if ok
+                    else f"via Ollama ({model}) – Ollama svarar inte"
+                ),
+                "kind": "ok" if ok else "warn",
+                "action": None,
+            }
         if llm.installed(self.cfg):
             return {
                 "state": f"installerad – markera text och tryck {key}",
@@ -644,13 +656,17 @@ class App:
                 restore_original_clipboard()  # rensa ev. sparat original
                 self.overlay.show("(ingen markering)", GRAY, auto_hide_ms=1500)
                 return
-            if self._polisher is None:
-                self.overlay.show("Laddar poleringsmodellen…", GRAY)
-                self._polisher = llm.Polisher(self.cfg)
             try:
-                self._polisher.ensure_loaded()
-                self.overlay.show("Polerar…", BLUE)
-                result = self._polisher.polish(text, style)
+                if self.cfg["polish_backend"] == "ollama":
+                    self.overlay.show("Polerar via Ollama…", BLUE)
+                    result = llm.polish_ollama(self.cfg, text, style)
+                else:
+                    if self._polisher is None:
+                        self.overlay.show("Laddar poleringsmodellen…", GRAY)
+                        self._polisher = llm.Polisher(self.cfg)
+                    self._polisher.ensure_loaded()
+                    self.overlay.show("Polerar…", BLUE)
+                    result = self._polisher.polish(text, style)
             except Exception:
                 log.exception("Poleringen misslyckades")
                 restore_original_clipboard()

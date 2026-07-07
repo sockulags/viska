@@ -35,13 +35,18 @@ RUNTIME_URL = (
 
 
 def model_path(cfg: dict) -> Path:
-    return LLM_DIR / cfg["polish_model_file"]
+    p = Path(cfg["polish_model_file"])
+    # Absolut sökväg = användarens egen GGUF (t.ex. en Ollama-blob).
+    return p if p.is_absolute() else LLM_DIR / p
 
 
 def model_installed(cfg: dict) -> bool:
+    p = model_path(cfg)
+    if not p.is_relative_to(LLM_DIR):
+        return p.is_file()  # egen fil: markören gäller bara vår katalog
     if _REMOVE_MARKER.exists():
         return False
-    return model_path(cfg).is_file()
+    return p.is_file()
 
 
 def _bundled_runtime_dir() -> Path | None:
@@ -69,7 +74,70 @@ def runtime_installed() -> bool:
 
 
 def installed(cfg: dict) -> bool:
+    if cfg["polish_backend"] == "ollama":
+        return ollama_reachable(cfg)
     return model_installed(cfg) and runtime_installed()
+
+
+# -- Ollama-backend: återanvänd en körande Ollama och dess modeller ------------
+
+
+def ollama_reachable(cfg: dict) -> bool:
+    try:
+        with urllib.request.urlopen(
+            f"{cfg['polish_ollama_url']}/api/tags", timeout=2
+        ):
+            return True
+    except Exception:
+        return False
+
+
+def polish_ollama(cfg: dict, text: str, style: str = "") -> str:
+    import json
+
+    body = {
+        "model": cfg["polish_ollama_model"],
+        "messages": [
+            {"role": "system", "content": _system_prompt(style)},
+            {"role": "user", "content": text},
+        ],
+        "stream": False,
+        "options": {"temperature": 0},
+        # Låt modellen bo kvar i VRAM mellan poleringar — annars
+        # betalas inläsningen (~30-60 s för större modeller) varje gång.
+        "keep_alive": "15m",
+        # Resonerande modeller (qwen3 m.fl.) tänker annars dolt i
+        # hundratals tokens — 16 s blir 3 s med tänket avstängt.
+        "think": False,
+    }
+
+    def _call(payload: dict) -> dict:
+        req = urllib.request.Request(
+            f"{cfg['polish_ollama_url']}/api/chat",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        # Generös tidsgräns: Ollama kan behöva läsa in modellen först.
+        with urllib.request.urlopen(req, timeout=180) as r:
+            return json.load(r)
+
+    try:
+        out = _call(body)
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode(errors="replace")
+        if "think" not in detail.lower():
+            raise
+        body.pop("think")  # modellen saknar tänk-stöd: kör utan flaggan
+        out = _call(body)
+    result = _strip_thinking(out["message"]["content"]).strip()
+    return result or text
+
+
+def _strip_thinking(text: str) -> str:
+    # Resonerande modeller (deepseek-r1 m.fl.) kan inleda med <think>-block.
+    import re
+
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
 
 
 def download_size_gb(cfg: dict) -> float:

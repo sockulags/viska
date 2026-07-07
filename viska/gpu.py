@@ -56,6 +56,23 @@ def has_nvidia_gpu() -> bool:
         return False
 
 
+def vram_gb() -> float | None:
+    exe = shutil.which("nvidia-smi")
+    if not exe:
+        return None
+    try:
+        r = subprocess.run(
+            [exe, "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True,
+            timeout=10,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        return int(r.stdout.strip().splitlines()[0]) / 1024
+    except Exception:
+        return None
+
+
 def gpu_name() -> str | None:
     exe = shutil.which("nvidia-smi")
     if not exe:

@@ -22,6 +22,18 @@ AUTO_MODELS = {
 }
 
 
+def _auto_cuda_choice() -> tuple[str, str]:
+    """VRAM-medvetet val: large float16 kräver ~4 GB — på små kort (t.ex.
+    4 GB-laptopar) hade auto annars OOM:at och trillat ner på CPU trots
+    att GPU:n räcker gott för medium i int8."""
+    from viska.gpu import vram_gb
+
+    vram = vram_gb()
+    if vram is not None and vram < 6:
+        return "KBLab/kb-whisper-medium", "int8_float16"
+    return "KBLab/kb-whisper-large", "float16"
+
+
 def _add_nvidia_dll_dirs() -> None:
     """Gör pip-installerade CUDA-bibliotek (cuBLAS/cuDNN) hittbara för ctranslate2.
 
@@ -79,8 +91,12 @@ class Transcriber:
         devices = ["cuda", "cpu"] if device == "auto" else [device]
         last_error = None
         for dev in devices:
-            name = AUTO_MODELS[dev] if model == "auto" else model
-            compute = compute_type or ("float16" if dev == "cuda" else "int8")
+            if model == "auto" and dev == "cuda":
+                name, default_compute = _auto_cuda_choice()
+            else:
+                name = AUTO_MODELS[dev] if model == "auto" else model
+                default_compute = "float16" if dev == "cuda" else "int8"
+            compute = compute_type or default_compute
             try:
                 if dev == "cuda":
                     _add_nvidia_dll_dirs()

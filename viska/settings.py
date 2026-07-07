@@ -334,6 +334,11 @@ class SettingsWindow:
         adv_entry("Max inspelning (s)", "max_recording_s", cfg["max_recording_s"])
         adv_entry("Hålltröskel (s)", "hold_threshold_s", cfg["hold_threshold_s"])
         adv_entry("Poleringstangent", "polish_hotkey", cfg["polish_hotkey"])
+        adv_combo(
+            "Poleringsbackend", "polish_backend", cfg["polish_backend"],
+            ["builtin", "ollama"],
+        )
+        adv_entry("Ollama-modell", "polish_ollama_model", cfg["polish_ollama_model"])
         self._restore = tk.BooleanVar(value=bool(cfg["restore_clipboard"]))
         self._append = tk.BooleanVar(value=bool(cfg["append_space"]))
         self._keep_mic = tk.BooleanVar(value=bool(cfg["keep_mic_open"]))
@@ -578,6 +583,11 @@ class SettingsWindow:
             self._adv["hold_threshold_s"].get().replace(",", ".") or 0.35
         )
         changes["polish_hotkey"] = self._adv["polish_hotkey"].get().strip() or "f8"
+        backend = self._adv["polish_backend"].get().strip()
+        changes["polish_backend"] = backend if backend in ("builtin", "ollama") else "builtin"
+        changes["polish_ollama_model"] = (
+            self._adv["polish_ollama_model"].get().strip() or "qwen3.5:9b"
+        )
         return changes
 
     def _save(self) -> None:
