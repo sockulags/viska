@@ -66,6 +66,12 @@ ordlista, eget inskrivningssätt (t.ex. tecken för tecken i terminaler),
 egen poleringsuppgift (en mall eller egen text) och — om du uttryckligen
 väljer det — eget språk. Språk byts aldrig automatiskt.
 
+Profillistan visar programmens riktiga namn (t.ex. "Visual Studio Code"
+i stället för "code.exe") — config nycklas fortfarande på processnamnet,
+namnet är bara presentation. **Ny…** öppnar en väljare med körande
+program som har ett synligt fönster; markera ett i listan eller skriv
+processnamnet för hand om appen inte körs just nu.
+
 **Röstkommandon:** säg "ny rad" eller "nytt stycke" (engelska: "new
 line", "new paragraph") så skrivs radbrytning i stället för orden.
 Fraserna redigeras under `voice_commands` i config-filen — ta bort en
