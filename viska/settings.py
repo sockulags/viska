@@ -417,6 +417,17 @@ class SettingsWindow:
             ttk.Checkbutton(advanced, text=text, variable=var).pack(
                 anchor="w", pady=1
             )
+        # GitHub-token för den inbyggda uppdateraren mot ett privat repo.
+        # Lösenordsmaskerad; tom som standard (anonymt, funkar för publika repon).
+        self._github_token = tk.StringVar(value=str(cfg.get("github_token", "") or ""))
+        holder = self._row(
+            advanced,
+            "GitHub-token",
+            hint="Krävs för inbyggd uppdaterare mot privat repo",
+        )
+        ttk.Entry(
+            holder, textvariable=self._github_token, width=_FIELD_W, show="•"
+        ).pack()
         files = tk.Frame(advanced, bg=pal["window"])
         files.pack(anchor="w", pady=(10, 0))
         ttk.Button(
@@ -1007,6 +1018,7 @@ class SettingsWindow:
             "keep_mic_open": self._keep_mic.get(),
             "check_updates": self._updates.get(),
             "history_persist": self._history_persist.get(),
+            "github_token": self._github_token.get().strip(),
         }
         if self._feel.get() in FEELS:
             interval, silence = FEELS[self._feel.get()]

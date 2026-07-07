@@ -149,6 +149,11 @@ DEFAULTS = {
     # Kolla efter ny version mot GitHub releases vid start (endast en
     # versionssiffra hämtas; ingen data skickas).
     "check_updates": True,
+    # Personlig GitHub-token (PAT) för den inbyggda uppdateraren när repot är
+    # privat: skickas som Authorization-header vid versionskoll och asset-
+    # nedladdning. Tom = anonymt (fungerar för publika repon). Sätts i
+    # Inställningar → Avancerat (lösenordsmaskerat fält).
+    "github_token": "",
     # Hur ofta ljudet omtranskriberas, och hur lång paus som gör en fras
     # färdig (färdig text skrivs in och kan inte ändras i efterhand).
     # Lägre = snabbare inskrivning men committar hellre vid korta pauser.

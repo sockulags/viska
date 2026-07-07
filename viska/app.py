@@ -7,6 +7,7 @@ import queue
 import sys
 import threading
 import tkinter as tk
+import urllib.error
 from collections import deque
 from pathlib import Path
 
@@ -76,6 +77,10 @@ class App:
             persisted = load_history()[: int(cfg["history_size"])]
             self.history = deque(persisted, maxlen=int(cfg["history_size"]))
         self.update_tag: str | None = None
+        self.update_release: update.Release | None = None
+        # Spärr mot att den inbyggda uppdateraren startas flera gånger (dubbel-
+        # klick på hämta-raden, bekräftelsedialog redan öppen).
+        self._updating = threading.Event()
         self.transcribers: dict[str, Transcriber] = {}
         self.language = cfg["language"] if cfg["language"] in LANG_NAMES else "sv"
         self.last_text = ""
@@ -157,7 +162,9 @@ class App:
             target=self._load_model, args=(self.language,), daemon=True
         ).start()
         if cfg["check_updates"]:
-            update.check_async(__version__, self._on_update_available)
+            update.check_async(
+                __version__, self._on_update_available, token=cfg.get("github_token", "")
+            )
         self._poll_quit()
 
     def flush_startup_notices(self) -> None:
@@ -173,10 +180,149 @@ class App:
                 pass  # tray-notiser är kosmetiska, felet finns redan i loggen
         self._startup_notices.clear()
 
-    def _on_update_available(self, tag: str) -> None:
-        self.update_tag = tag
-        self.status += f" · ny version {tag} finns"
+    def _on_update_available(self, release: "update.Release") -> None:
+        # Idempotent: en omkontroll (t.ex. efter att en token satts i
+        # Inställningar) får inte lägga till statussuffixet en gång till.
+        if self.update_release is not None and self.update_release.tag == release.tag:
+            return
+        self.update_release = release
+        self.update_tag = release.tag
+        self.status += f" · ny version {release.tag} finns"
         self._refresh_tray_menu()
+
+    # -- Inbyggd uppdaterare (hämta-raden i traymenyn) ------------------------------
+
+    def _on_update_clicked(self) -> None:
+        """Klick på hämta-raden. Körs på pystray-tråden. I dev-läge behålls
+        dagens beteende (öppna releases-sidan); i fryst exe-läge lämnas
+        bekräftelsedialogen till huvudtråden (tkinter är huvudtrådsbundet)."""
+        if not getattr(sys, "frozen", False):
+            self._open_releases_page()
+            return
+        self._ui_queue.put(self._confirm_update)
+
+    def _confirm_update(self) -> None:
+        """Huvudtråden: bekräfta och starta nedladdningen i bakgrunden. Finns
+        ingen matchande zip-asset öppnas releases-sidan direkt (ingen omstart
+        att bekräfta)."""
+        if self._updating.is_set():
+            return
+        release = self.update_release
+        if release is None:
+            self._open_releases_page()
+            return
+        install_dir = Path(sys.executable).parent
+        prefer_gpu = (install_dir / "_internal" / "nvidia").is_dir()
+        asset = update.select_asset(release, prefer_gpu)
+        if asset is None:
+            log.info(
+                "Ingen matchande zip-asset för %s – öppnar releases-sidan",
+                release.tag,
+            )
+            self._open_releases_page()
+            return
+        # Sätt spärren INNAN dialogen: en modal messagebox kör en egen
+        # händelseloop, så after-pollen kan hinna köa ett andra _confirm_update
+        # och öppna en andra dialog utan spärren. Släpps igen vid Nej.
+        self._updating.set()
+        from tkinter import messagebox
+
+        ok = messagebox.askyesno(
+            "Viska",
+            f"Uppdatera till {release.tag}? Viska startas om.",
+            parent=self.root,
+        )
+        if not ok:
+            self._updating.clear()
+            return
+        threading.Thread(
+            target=self._run_update,
+            args=(release, asset),
+            daemon=True,
+            name="viska-update-install",
+        ).start()
+
+    def _run_update(self, release: "update.Release", asset: dict) -> None:
+        """Bakgrundstråd: ladda ner, packa upp, validera, skriv och starta
+        uppdaterings-baten, och avsluta appen för omstart. Varje steg före
+        bat-starten är rent additivt (temp-filer) — misslyckas något rörs
+        installationen aldrig och vi faller tillbaka på releases-sidan."""
+        try:
+            install_dir = Path(sys.executable).parent
+            # Sanity: rör inget om vi inte känner igen installationskatalogen.
+            if not (install_dir / "Viska.exe").is_file():
+                raise RuntimeError(
+                    f"Installationskatalogen saknar Viska.exe: {install_dir}"
+                )
+            work = update.fresh_workdir()
+            zip_path = work / asset["name"]
+            self.overlay.show(f"Hämtar {release.tag}…", BLUE)
+            last_pct = [-1]
+
+            def progress(frac: float) -> None:
+                # Töm inte overlay-kön i onödan: uppdatera bara vid ny procent.
+                pct = int(frac * 100)
+                if pct != last_pct[0]:
+                    last_pct[0] = pct
+                    self.overlay.show(f"Hämtar {release.tag}… {pct} %", BLUE)
+
+            try:
+                update.download_asset(
+                    asset,
+                    zip_path,
+                    token=self.cfg.get("github_token", ""),
+                    progress=progress,
+                )
+            except urllib.error.HTTPError as e:
+                if e.code in (401, 403, 404):
+                    log.info(
+                        "Uppdatering: asset-nedladdning nekades (HTTP %s) – "
+                        "privat repo utan giltig token? Faller tillbaka på "
+                        "releases-sidan.",
+                        e.code,
+                    )
+                    self._update_fallback()
+                    return
+                raise
+            self.overlay.show("Packar upp uppdateringen…", BLUE)
+            app_dir = update.extract_update(zip_path, work / "extracted")
+            if app_dir is None:
+                raise RuntimeError("Uppackningen saknade Viska.exe eller _internal/")
+            bat = update.write_updater_bat(os.getpid(), app_dir, install_dir, work)
+            update.launch_updater(bat)
+            log.info(
+                "Uppdatering till %s startad – avslutar Viska för omstart",
+                release.tag,
+            )
+            self.overlay.show(
+                f"Installerar {release.tag} – Viska startas om…", GREEN
+            )
+            # Avsluta via huvudtråden (samma väg som Avsluta-menyvalet). Baten
+            # väntar på att vår PID försvinner innan den rör installationen.
+            self._ui_queue.put(self.quit)
+        except Exception:
+            log.exception(
+                "Den inbyggda uppdateringen misslyckades – faller tillbaka "
+                "på releases-sidan"
+            )
+            self._update_fallback()
+
+    def _update_fallback(self) -> None:
+        """Släpp spärren och öppna releases-sidan i webbläsaren, precis som
+        det icke frysta läget och äldre versioner gör."""
+        self._updating.clear()
+        self.overlay.show(
+            "Uppdateringen misslyckades – öppnar hämtningssidan",
+            GRAY,
+            auto_hide_ms=5000,
+        )
+        self._open_releases_page()
+
+    def _open_releases_page(self) -> None:
+        try:
+            os.startfile(update.RELEASES_URL)
+        except Exception:
+            log.exception("Kunde inte öppna releases-sidan")
 
     def _refresh_tray_menu(self) -> None:
         # pystrays Windows-backend bygger menyn EN gång och uppdaterar den
@@ -904,6 +1050,10 @@ class App:
         )
         mic_changed = changes["keep_mic_open"] != old["keep_mic_open"]
         history_persist_changed = changes["history_persist"] != old["history_persist"]
+        # Fångas före update(): en ny token gör att uppdateringskollen mot ett
+        # privat repo kan lyckas — kör om den nu så hämta-raden dyker upp utan
+        # omstart (annars först vid nästa start).
+        token_changed = changes.get("github_token", "") != old.get("github_token", "")
         self.cfg.update(changes)
         save(self.cfg)
         if history_persist_changed:
@@ -930,6 +1080,12 @@ class App:
             threading.Thread(
                 target=self._refresh_ollama_reachable, daemon=True
             ).start()
+        if token_changed and self.cfg["check_updates"] and self.update_release is None:
+            update.check_async(
+                __version__,
+                self._on_update_available,
+                token=self.cfg.get("github_token", ""),
+            )
         self.sounds.enabled = bool(changes["sounds"])
         for t in self.transcribers.values():
             t.initial_prompt = changes["initial_prompt"]
@@ -1221,7 +1377,7 @@ def make_tray(app: App):
         ),
         pystray.MenuItem(
             lambda item: f"Hämta version {app.update_tag}",
-            lambda icon, item: os.startfile(update.RELEASES_URL),
+            lambda icon, item: app._on_update_clicked(),
             visible=lambda item: app.update_tag is not None,
         ),
         pystray.Menu.SEPARATOR,

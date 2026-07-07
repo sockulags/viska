@@ -50,7 +50,9 @@ transkriberar) och korta pip markerar start och stopp.
 **Traymenyn** (högerklick på ikonen; röd under inspelning): Inställningar,
 historik (senaste dikteringarna, klicka för att kopiera — hålls i RAM som
 standard, se Integritet), växla svenska/engelska, byta mikrofon, avsluta.
-Finns en ny version på GitHub visas en hämta-rad överst.
+Finns en ny version på GitHub visas en hämta-rad överst. I den fristående
+.exe:n (se nedan) laddar hämta-raden ner, installerar och startar om Viska
+direkt — se Uppdatering. I utvecklingsläge öppnar den releases-sidan.
 
 **Inställningarna** har fyra flikar: *Allmänt* (språk, tangent med
 tryck-för-att-välja, livekänsla Lugn/Normal/Snabb, kvalitet i klartext,
@@ -193,9 +195,30 @@ dikteringen körs mot den tills du växlar tillbaka.
   `%APPDATA%\viska\history.json` vid varje ändring och läses in igen vid
   start; stängs den av raderas filen om den finns.
 
+## Uppdatering
+
+Vid start kollar Viska GitHub-releases efter en nyare version (bara ett
+versionsnummer hämtas; ingen data skickas — stäng av under Inställningar →
+Avancerat). Finns en nyare visas **Hämta version X** överst i traymenyn.
+
+I den fristående .exe:n gör hämta-raden hela jobbet: efter en bekräftelse
+laddas release-zippen ner till `%TEMP%`, packas upp och valideras, varefter
+Viska startar om på den nya versionen. Allt före omstarten är rent additivt
+(temp-filer) — misslyckas något (nätverksfel, ofullständig nedladdning) rörs
+den installerade versionen aldrig, och releases-sidan öppnas i webbläsaren
+i stället. Nedladdningen sker i bakgrunden; du kan diktera under tiden.
+
+Är repot privat krävs en **GitHub-token** (personlig access-token med
+läsrätt) i Inställningar → Avancerat → *GitHub-token*. Utan giltig token
+faller uppdateringen tillbaka på att öppna releases-sidan för manuell
+hämtning. I utvecklingsläge (`uv run viska`) öppnas alltid releases-sidan.
+
 ## Felsökning
 
 - **Loggen** finns i `%APPDATA%\viska\viska.log`.
+- **Uppdateringen startade inte om**: uppdaterarens egen logg finns i
+  `%TEMP%\viska-update.log` (robocopy-utfall m.m.). Vid fel öppnas
+  releases-sidan så du kan hämta zippen manuellt.
 - **"Modellen kunde inte laddas" med GPU**: kontrollera att `uv sync
   --extra gpu` kördes (cuBLAS/cuDNN-paketen krävs för CUDA). Viska faller
   automatiskt tillbaka på CPU.
