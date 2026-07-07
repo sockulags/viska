@@ -177,37 +177,41 @@ class ToneMenu:
         self._queue: queue.Queue = queue.Queue()
         self._win: tk.Toplevel | None = None
         self._on_choose = None
+        self._on_cancel = None
         self._timeout_job = None
         self._poll()
 
     # -- Trådsäkra metoder ------------------------------------------------------
 
-    def show(self, options, on_choose) -> None:
+    def show(self, options, on_choose, on_cancel=None) -> None:
         """options: lista av (etikett, style, is_default). style None = appens
-        standardton. on_choose(style) anropas i huvudtråden vid val. Trådsäker
-        — kan anropas från hotkey-tråden."""
-        self._queue.put((options, on_choose))
+        standardton. on_choose(style) anropas i huvudtråden vid val. Stängs
+        menyn utan val (Esc, klick utanför eller timeout) anropas i stället
+        on_cancel() — anroparen kan då släppa ett "upptaget"-tillstånd.
+        Trådsäker — kan anropas från hotkey-tråden."""
+        self._queue.put((options, on_choose, on_cancel))
 
     def close(self) -> None:
-        self._queue.put((None, None))
+        self._queue.put((None, None, None))
 
     # -- Körs i huvudtråden -----------------------------------------------------
 
     def _poll(self) -> None:
         try:
             while True:
-                options, on_choose = self._queue.get_nowait()
+                options, on_choose, on_cancel = self._queue.get_nowait()
                 if options is None:
                     self._close()
                 else:
-                    self._open(options, on_choose)
+                    self._open(options, on_choose, on_cancel)
         except queue.Empty:
             pass
         self._root.after(_POLL_MS, self._poll)
 
-    def _open(self, options, on_choose) -> None:
+    def _open(self, options, on_choose, on_cancel) -> None:
         self._close()
         self._on_choose = on_choose
+        self._on_cancel = on_cancel
         pal = ui.palette()
         win = tk.Toplevel(self._root)
         self._win = win
@@ -271,6 +275,8 @@ class ToneMenu:
 
     def _choose(self, style) -> None:
         cb = self._on_choose
+        # Ett val gjordes: avbryt-callbacken ska INTE köras när _close städar.
+        self._on_cancel = None
         self._close()
         if cb is not None:
             cb(style)
@@ -283,9 +289,15 @@ class ToneMenu:
             except Exception:
                 pass
         win, self._win = self._win, None
+        cancel, self._on_cancel = self._on_cancel, None
         self._on_choose = None
         if win is not None:
             try:
                 win.destroy()
             except Exception:
                 pass
+        # Stängdes menyn utan val körs avbryt-callbacken sist (efter att allt
+        # städats), så anroparen kan släppa sitt upptaget-tillstånd. Körs bara
+        # en gång — _on_cancel nollas ovan.
+        if cancel is not None:
+            cancel()

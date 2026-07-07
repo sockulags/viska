@@ -875,7 +875,12 @@ class App:
         fokus) och lämna själva menyn till huvudtråden via ToneMenu. Valet
         gäller bara den poleringen; ingen config ändras."""
         if self._polishing.is_set():
-            return  # en polering pågår redan
+            # En polering pågår redan, ELLER tonvalsmenyn är redan öppen och
+            # väntar på ett val. Utan den här spärren skulle ett extra
+            # dubbeltryck (menyn har tagit tangentfokus) läsa menyns eget
+            # fönster som målfönster, och ett extra enkeltryck starta en
+            # parallell polering vars guard sedan tyst svalde menyvalet.
+            return
         if foreground_is_terminal():
             # Ctrl+C utan markering blir SIGINT i konsoler — ingen meny där.
             self.overlay.show(
@@ -889,25 +894,70 @@ class App:
         fg = foreground_app()
         profile = self.cfg["app_profiles"].get(fg, {}) if fg else {}
         app_default = profile.get("polish_prompt") or self.cfg["polish_prompt"]
-        # Appens standard förmarkerad (style None = härleds i _do_polish, exakt
-        # som enkeltryck); sedan de fördefinierade tonerna på aktivt språk.
-        label = "Appens standard" if app_default else "Standard (allmän)"
-        options = [(label, None, True)]
-        options += [
-            (name, task, False) for name, task in llm.tone_presets(self.language)
-        ]
+        lang = self.language
+        # Markera upptaget REDAN NU — innan menyn ens hunnit visas. Då blockerar
+        # guarden ovan varje ytterligare tryck så länge menyn står öppen; först
+        # ett val (via _run_polish → _do_polish) eller ett avbrott (on_cancel)
+        # släpper flaggan igen.
+        self._polishing.set()
 
-        def on_choose(style):
-            self._start_polish(style=style, target_hwnd=target_hwnd)
+        def prepare():
+            # llm.installed() kan för Ollama-backend vara ett synkront HTTP-
+            # anrop (2 s timeout) — därför på egen tråd, aldrig på hotkey-
+            # loopen. Samma tillgänglighetskoll som enkeltryck gör i _do_polish,
+            # men här FÖRE menyn så beskedet blir detsamma direkt i stället för
+            # först efter ett val.
+            if not llm.installed(self.cfg):
+                self._polishing.clear()
+                self.overlay.show(
+                    "Polering ej installerad – Inställningar → Polering",
+                    GRAY,
+                    auto_hide_ms=3000,
+                )
+                return
+            # Appens standard förmarkerad (style None = härleds i _do_polish,
+            # exakt som enkeltryck); sedan de fördefinierade tonerna på aktivt
+            # språk.
+            label = "Appens standard" if app_default else "Standard (allmän)"
+            options = [(label, None, True)]
+            options += [
+                (name, task, False) for name, task in llm.tone_presets(lang)
+            ]
 
-        self.tone_menu.show(options, on_choose)
+            def on_choose(style):
+                # Menyval: _polishing är redan satt (togs när menyn öppnades),
+                # så gå via _run_polish som INTE guardar — annars skulle guarden
+                # i _start_polish tyst svälja valet.
+                self._run_polish(style, target_hwnd)
+
+            def on_cancel():
+                # Menyn stängdes utan val (Esc, klick utanför eller timeout):
+                # släpp upptaget-flaggan så nästa tryck fungerar igen.
+                self._polishing.clear()
+
+            self.tone_menu.show(options, on_choose, on_cancel)
+
+        threading.Thread(
+            target=prepare, daemon=True, name="viska-polish-menu"
+        ).start()
 
     def _start_polish(
         self, style: str | None = None, target_hwnd: int | None = None
     ) -> None:
+        # Guardad ingång (enkeltryck): hoppa över om en polering pågår eller
+        # tonvalsmenyn står öppen. Menyvalet går i stället via _run_polish.
         if self._polishing.is_set():
             return
         self._polishing.set()
+        self._run_polish(style, target_hwnd)
+
+    def _run_polish(
+        self, style: str | None, target_hwnd: int | None
+    ) -> None:
+        """Startar själva poleringstråden. _polishing MÅSTE redan vara satt av
+        anroparen (enkeltryck via _start_polish, eller ett menyval där flaggan
+        togs redan när menyn öppnades). _do_polish nollställer den när den är
+        klar."""
         threading.Thread(
             target=self._do_polish,
             args=(style, target_hwnd),
