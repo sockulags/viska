@@ -38,6 +38,14 @@ DEFAULTS = {
     "restore_clipboard": True,
     "append_space": True,
     "max_recording_s": 300,
+    # Liveläge: färdiga fraser skrivs in medan du fortfarande pratar; den
+    # pågående frasen förhandsvisas i overlayn. "auto" = på när GPU
+    # används (CPU hinner inte transkribera om i realtid). Även true/false.
+    "live": "auto",
+    # Hur ofta ljudet omtranskriberas, och hur lång paus som gör en fras
+    # färdig (färdig text skrivs in och kan inte ändras i efterhand).
+    "live_interval_s": 0.7,
+    "live_commit_silence_s": 0.6,
     # null = systemets standardmikrofon. Annars namn eller index från
     # `viska --list-devices`.
     "input_device": None,

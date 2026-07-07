@@ -51,6 +51,15 @@ transkriberar) och korta pip markerar start och stopp.
 senaste dikteringen igen (om den hamnade fel), byta till ny
 standardmikrofon, öppna inställningar/logg, avsluta.
 
+### Liveläge
+
+Med GPU skrivs texten in **medan du pratar**: varje fras blir färdig när
+du gör en kort paus (~0,6 s) och skrivs in direkt, medan frasen du håller
+på med förhandsvisas i remsan nertill. Whisper är ingen streamingmodell,
+så redan inskriven text kan inte ändras i efterhand — det är därför bara
+färdiga fraser skrivs in, aldrig den pågående. Stäng av med `"live":
+false` i config om du hellre får hela dikteringen på en gång.
+
 ## Konfiguration
 
 `%APPDATA%\viska\config.json` (skapas vid första start; starta om Viska
@@ -70,6 +79,9 @@ efter ändringar):
 | `restore_clipboard` | `true` | Återställ gamla klippbordet efter inklistring |
 | `append_space` | `true` | Mellanslag efter varje diktering |
 | `max_recording_s` | `300` | Säkerhetsstopp för inspelning |
+| `live` | `"auto"` | Liveläge: `auto` = på med GPU, av på CPU. Även `true`/`false` |
+| `live_interval_s` | `0.7` | Hur ofta ljudet omtranskriberas i liveläget |
+| `live_commit_silence_s` | `0.6` | Paus som gör en fras färdig (skrivs in, ändras aldrig) |
 | `input_device` | `null` | `null` = standardmikrofon, annars index från `--list-devices` |
 | `keep_mic_open` | `true` | Öppen mikrofonström = ingen klippt första stavelse |
 | `sounds` | `true` | Pip vid start/stopp |

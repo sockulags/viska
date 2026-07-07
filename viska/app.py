@@ -17,6 +17,7 @@ from viska.hotkey import HotkeyError, PushToTalk
 from viska.inject import copy_to_clipboard, inject
 from viska.overlay import BLUE, GRAY, GREEN, RED, Overlay
 from viska.sounds import Sounds
+from viska.stream import LiveWorker
 from viska.transcribe import Transcriber
 
 log = logging.getLogger("viska")
@@ -45,6 +46,8 @@ class App:
         # och maxtidstimern) och fryser vilket språk sessionen hade.
         self._session_lock = threading.Lock()
         self._session_language = self.language
+        self._live: LiveWorker | None = None
+        self._live_texts: list[str] = []  # fraser som redan skrivits in
         self.hotkey = PushToTalk(
             cfg["hotkey"], cfg["hold_threshold_s"], self._on_start, self._on_stop
         )
@@ -134,7 +137,43 @@ class App:
             )
             self._watchdog.daemon = True
             self._watchdog.start()
+            self._live_texts = []
+            if self._live_enabled(lang):
+                self._live = LiveWorker(
+                    self.transcribers[lang],
+                    self.recorder,
+                    lang,
+                    on_commit=self._on_live_commit,
+                    on_partial=self._on_live_partial,
+                    interval_s=self.cfg["live_interval_s"],
+                    commit_silence_s=self.cfg["live_commit_silence_s"],
+                )
+                self._live.start()
             return True
+
+    def _live_enabled(self, lang: str) -> bool:
+        live = self.cfg["live"]
+        if live == "auto":
+            return self.transcribers[lang].device == "cuda"
+        return bool(live)
+
+    def _on_live_commit(self, text: str) -> None:
+        self._live_texts.append(text)
+        try:
+            # Mellanslag mellan fraser oavsett append_space — annars klistras
+            # nästa fras fast i den förra.
+            inject(
+                text + " ", self.cfg["inject_mode"], self.cfg["restore_clipboard"]
+            )
+        except Exception:
+            # Frasen finns kvar i last_text (traymenyn: Kopiera senaste).
+            log.exception("Kunde inte skriva in livefrasen")
+
+    def _on_live_partial(self, partial: str) -> None:
+        if partial:
+            if len(partial) > 70:
+                partial = "…" + partial[-70:]
+            self.overlay.show(f"● {partial}", RED)
 
     def _on_max_time(self) -> None:
         # force_stop() avgör atomiskt vem som äger stoppet — bara om vi tog
@@ -149,34 +188,48 @@ class App:
             watchdog, self._watchdog = self._watchdog, None
             if watchdog is not None:
                 watchdog.cancel()
-            audio = self.recorder.stop()
             self.sounds.stop()
+            live, self._live = self._live, None
+            committed = live.stop() if live is not None else 0
+            audio = self.recorder.stop()
+            if committed:
+                audio = audio[committed:]
+            # Kopia: skulle ett hängande livepass leva kvar får det inte
+            # mutera listan som _finish läser.
+            live_texts = list(self._live_texts)
             self._transcribing.set()
             self.overlay.show("… Transkriberar", BLUE)
             lang = self._session_language
         threading.Thread(
             target=self._finish,
-            args=(audio, lang),
+            args=(audio, lang, live_texts),
             daemon=True,
             name="viska-transcribe",
         ).start()
 
-    def _finish(self, audio: np.ndarray, lang: str) -> None:
+    def _finish(self, audio: np.ndarray, lang: str, live_texts: list[str]) -> None:
         try:
+            if live_texts:
+                # Sätts innan sluttranskriberingen: kastar den ett fel ska
+                # de redan inskrivna fraserna ändå finnas i "Kopiera
+                # senaste diktering".
+                self.last_text = " ".join(live_texts).strip()
+            text = ""
             too_short = len(audio) < 0.3 * SAMPLE_RATE
             silent = audio.size == 0 or float(np.abs(audio).max()) < 0.003
-            if too_short or silent:
-                self.overlay.hide()
-                return
             transcriber = self.transcribers.get(lang)
-            if transcriber is None:  # ska inte kunna hända: fanns vid start
-                self.overlay.hide()
-                return
-            text = transcriber.transcribe(audio, lang)
+            if not (too_short or silent) and transcriber is not None:
+                text = transcriber.transcribe(audio, lang)
+            if live_texts or text:
+                self.last_text = " ".join([*live_texts, text]).strip()
             if not text:
-                self.overlay.show("(inget tal uppfattades)", GRAY, auto_hide_ms=1500)
+                if not live_texts and not (too_short or silent):
+                    self.overlay.show(
+                        "(inget tal uppfattades)", GRAY, auto_hide_ms=1500
+                    )
+                else:
+                    self.overlay.hide()
                 return
-            self.last_text = text
             if self.cfg["append_space"]:
                 text += " "
             inject(text, self.cfg["inject_mode"], self.cfg["restore_clipboard"])

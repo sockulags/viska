@@ -84,6 +84,21 @@ class Transcriber:
         segments, _ = model.transcribe(silence, beam_size=1)
         list(segments)
 
+    def transcribe_segments(self, audio, language: str | None = "sv") -> list:
+        """Som transcribe(), men returnerar segmentlistan med tidsstämplar —
+        liveläget behöver veta var i ljudet varje fras slutar."""
+        if language == "auto":
+            language = None
+        segments, _info = self._model.transcribe(
+            audio,
+            language=language,
+            beam_size=self.beam_size,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 400, "speech_pad_ms": 400},
+            condition_on_previous_text=False,
+        )
+        return list(segments)
+
     def transcribe(self, audio, language: str | None = "sv") -> str:
         """`audio` är en float32-array i 16 kHz, eller en sökväg till en ljudfil."""
         if language == "auto":

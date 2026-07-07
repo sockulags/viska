@@ -171,6 +171,11 @@ def _set_clipboard_text(text: str, private: bool = False) -> bool:
 # tidigare diktering.
 _generation = 0
 _saved_previous: str | None = None
+# Minsta tid mellan klippbordsskrivningar: långsamma appar (Electron, RDP)
+# läser klippbordet asynkront efter Ctrl+V — skrivs det över för snabbt
+# klistras fel text in. Samma marginal som återställningen använder.
+_PASTE_SPACING_S = 0.8
+_last_paste_t = 0.0
 
 
 def copy_to_clipboard(text: str) -> None:
@@ -195,8 +200,11 @@ def inject(text: str, mode: str = "paste", restore_clipboard: bool = True) -> No
 
 
 def _paste(text: str, restore: bool) -> None:
-    global _generation, _saved_previous
+    global _generation, _saved_previous, _last_paste_t
     with _clipboard_lock:
+        wait = _last_paste_t + _PASTE_SPACING_S - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
         _generation += 1
         generation = _generation
         if restore and _saved_previous is None:
@@ -206,6 +214,7 @@ def _paste(text: str, restore: bool) -> None:
             return
         time.sleep(0.05)  # låt klippbordet sätta sig innan Ctrl+V
         _send_ctrl_v()
+        _last_paste_t = time.monotonic()
     if restore:
         threading.Thread(
             target=_restore_later, args=(generation,), daemon=True

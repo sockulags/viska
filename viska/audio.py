@@ -72,6 +72,21 @@ class Recorder:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(chunks)[:, 0]
 
+    def snapshot(self, start_frame: int = 0) -> np.ndarray:
+        """Ljudet hittills, från och med start_frame (för liveläget).
+
+        Blocken är alltid BLOCK frames stora, så starten hittas med
+        heltalsaritmetik i stället för att konkatenera hela inspelningen.
+        """
+        with self._lock:
+            if self._chunks is None:
+                return np.zeros(0, dtype=np.float32)
+            skip, offset = divmod(start_frame, BLOCK)
+            tail = self._chunks[skip:]
+        if not tail:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(tail)[offset:, 0]
+
     def restart(self) -> None:
         """Byt till den mikrofon som nu är systemets standard."""
         with self._stream_lock:
