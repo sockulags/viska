@@ -53,14 +53,68 @@ _MODIFIER_KEYSYMS = {
 _FIELD_W = 30  # enhetlig fältbredd: lugn högerkant i alla flikar
 
 
+class _ActionPanel:
+    """Statuskort + åtgärdsknapp + förlopp för långkörande åtgärder
+    (GPU-stöd, poleringsmodell). Callbackarna anropas från arbetstrådar
+    och marshallas via kö till huvudtråden."""
+
+    def __init__(self, parent, win, panel: dict):
+        self.win = win
+        self.panel = panel
+        self.queue: queue.Queue = queue.Queue()
+        pal = ui.palette()
+        kind = "success" if panel.get("kind") == "ok" else "warn"
+        ui.status_card(parent, kind, panel["state"], panel.get("body", "")).pack(
+            fill="x", pady=(2, 4)
+        )
+        self.status = tk.Label(
+            parent, text="", bg=pal["window"], fg=pal["muted"],
+            font=("Segoe UI", 8), anchor="w",
+        )
+        self.status.pack(fill="x")
+        self.progress = ttk.Progressbar(parent, length=300, maximum=1.0)
+        if panel.get("action"):
+            self.button = ttk.Button(parent, text=panel["label"], command=self._run)
+            self.button.pack(anchor="w", pady=(2, 0))
+        self._poll()
+
+    def _run(self) -> None:
+        self.button.config(state="disabled")
+        self.progress.pack(anchor="w", pady=(4, 0))
+        self.panel["run"](
+            progress=lambda t, f: self.queue.put(("progress", t, f)),
+            done=lambda m: self.queue.put(("done", m, 1.0)),
+            error=lambda m: self.queue.put(("error", m, 0.0)),
+        )
+
+    def _poll(self) -> None:
+        try:
+            while True:
+                kind, text, frac = self.queue.get_nowait()
+                self.status.config(text=text)
+                if kind == "progress":
+                    self.progress["value"] = frac
+                else:
+                    self.progress.pack_forget()
+        except queue.Empty:
+            pass
+        if self.win.winfo_exists():
+            self.win.after(150, self._poll)
+
+
 class SettingsWindow:
-    def __init__(self, root: tk.Tk, cfg: dict, on_save, gpu_panel: dict | None = None):
+    def __init__(
+        self,
+        root: tk.Tk,
+        cfg: dict,
+        on_save,
+        gpu_panel: dict | None = None,
+        polish_panel: dict | None = None,
+    ):
         """on_save(ändringar: dict) -> None | str (fel visas, fönstret kvar).
-        gpu_panel: {"state", "action", "label", "run"} från App._gpu_panel()."""
+        Panelerna kommer från App._gpu_panel()/_polish_panel()."""
         ui.refresh_theme()
         self._on_save = on_save
-        self._gpu_panel = gpu_panel
-        self._gpu_queue: queue.Queue = queue.Queue()
         self._orig_model = cfg["model"]
         # Tål handredigerad config: hoppa över trasiga profilposter.
         self._profiles = {
@@ -154,24 +208,15 @@ class SettingsWindow:
 
         if gpu_panel is not None:
             ui.section(general, "GPU-stöd")
-            kind = "success" if "aktivt" in gpu_panel["state"] else "warn"
-            self._gpu_card = ui.status_card(
-                general, kind, gpu_panel["state"],
-                "" if gpu_panel.get("action") else "Inget att göra",
+            _ActionPanel(general, self.win, gpu_panel)
+        if polish_panel is not None:
+            ui.section(general, "Polering (AI)")
+            self._hint(
+                general,
+                "Markera text var som helst, tryck tangenten, få den omskriven "
+                "lokalt. Uppgift per app ställs in under Ordlista.",
             )
-            self._gpu_card.pack(fill="x", pady=(2, 4))
-            self._gpu_status = tk.Label(
-                general, text="", bg=pal["window"], fg=pal["muted"],
-                font=("Segoe UI", 8), anchor="w",
-            )
-            self._gpu_status.pack(fill="x")
-            self._gpu_progress = ttk.Progressbar(general, length=300, maximum=1.0)
-            if gpu_panel.get("action"):
-                self._gpu_button = ttk.Button(
-                    general, text=gpu_panel["label"], command=self._run_gpu_action
-                )
-                self._gpu_button.pack(anchor="w", pady=(2, 0))
-            self._poll_gpu()
+            _ActionPanel(general, self.win, polish_panel)
 
         # ---- Ordlista -------------------------------------------------------
 
@@ -223,6 +268,11 @@ class SettingsWindow:
             holder, textvariable=self._profile_lang,
             values=list(_PROFILE_LANG), state="readonly", width=_FIELD_W - 2,
         ).pack()
+        holder = self._row(
+            wordlist, "Poleringsprompt", hint="T.ex. \"omforma till artigt mejl\""
+        )
+        self._profile_polish = ui.themed_text(holder, width=32, height=2, wrap="word")
+        self._profile_polish.pack()
         ttk.Button(
             wordlist, text="Spara profil", command=self._save_profile
         ).pack(anchor="e", pady=(6, 0))
@@ -235,6 +285,16 @@ class SettingsWindow:
             "Säg \"ny rad\" eller \"nytt stycke\" så skrivs radbrytning i stället.\n"
             "Fraserna redigeras under voice_commands i config-filen.",
         )
+
+        ui.section(wordlist, "Poleringsprompt (global)")
+        self._hint(
+            wordlist,
+            "Uppgift när markerad text poleras. Tom = \"skriv om till korrekt, "
+            "naturlig text\". Per app: fältet i profilredigeraren ovan.",
+        )
+        self._polish_prompt = ui.themed_text(wordlist, width=54, height=2, wrap="word")
+        self._polish_prompt.pack(fill="x", pady=(4, 2))
+        self._polish_prompt.insert("1.0", cfg["polish_prompt"])
 
         # ---- Avancerat ------------------------------------------------------
 
@@ -273,6 +333,7 @@ class SettingsWindow:
         ).pack()
         adv_entry("Max inspelning (s)", "max_recording_s", cfg["max_recording_s"])
         adv_entry("Hålltröskel (s)", "hold_threshold_s", cfg["hold_threshold_s"])
+        adv_entry("Poleringstangent", "polish_hotkey", cfg["polish_hotkey"])
         self._restore = tk.BooleanVar(value=bool(cfg["restore_clipboard"]))
         self._append = tk.BooleanVar(value=bool(cfg["append_space"]))
         self._keep_mic = tk.BooleanVar(value=bool(cfg["keep_mic_open"]))
@@ -428,11 +489,14 @@ class SettingsWindow:
                 lang, "Samma som aktivt"
             )
         )
+        self._profile_polish.delete("1.0", "end")
+        self._profile_polish.insert("1.0", profile.get("polish_prompt", ""))
 
     def _new_profile(self) -> None:
         self._selected_app = None
         self._profile_app.set("")
         self._profile_prompt.delete("1.0", "end")
+        self._profile_polish.delete("1.0", "end")
         self._profile_inject.set(list(_INJECT_CHOICES)[0])
         self._profile_lang.set(list(_PROFILE_LANG)[0])
         self._profile_app_box.config(values=visible_apps())
@@ -447,6 +511,9 @@ class SettingsWindow:
         prompt = self._profile_prompt.get("1.0", "end").strip()
         if prompt:
             profile["initial_prompt"] = prompt
+        polish = self._profile_polish.get("1.0", "end").strip()
+        if polish:
+            profile["polish_prompt"] = polish
         inject = _INJECT_CHOICES[self._profile_inject.get()]
         if inject != "paste":
             profile["inject_mode"] = inject
@@ -466,32 +533,6 @@ class SettingsWindow:
             self._profiles.pop(self._app_list.get(selection[0]), None)
             self._refresh_profile_list()
 
-    # -- GPU-panelen ------------------------------------------------------------
-
-    def _run_gpu_action(self) -> None:
-        self._gpu_button.config(state="disabled")
-        self._gpu_progress.pack(anchor="w", pady=(4, 0))
-        # Callbackarna anropas från arbetstråden — marshallas via kön.
-        self._gpu_panel["run"](
-            progress=lambda t, f: self._gpu_queue.put(("progress", t, f)),
-            done=lambda msg: self._gpu_queue.put(("done", msg, 1.0)),
-            error=lambda msg: self._gpu_queue.put(("error", msg, 0.0)),
-        )
-
-    def _poll_gpu(self) -> None:
-        try:
-            while True:
-                kind, text, frac = self._gpu_queue.get_nowait()
-                self._gpu_status.config(text=text)
-                if kind == "progress":
-                    self._gpu_progress["value"] = frac
-                else:
-                    self._gpu_progress.pack_forget()
-        except queue.Empty:
-            pass
-        if self.win.winfo_exists():
-            self.win.after(150, self._poll_gpu)
-
     # -- Spara --------------------------------------------------------------------
 
     def values(self) -> dict:
@@ -503,6 +544,7 @@ class SettingsWindow:
             "live": _LIVE_CHOICES[self._live.get()],
             "sounds": self._sounds.get(),
             "initial_prompt": self._prompt.get("1.0", "end").strip(),
+            "polish_prompt": self._polish_prompt.get("1.0", "end").strip(),
             "app_profiles": dict(self._profiles),
             "inject_mode": _INJECT_CHOICES[self._inject.get()],
             "restore_clipboard": self._restore.get(),
@@ -535,6 +577,7 @@ class SettingsWindow:
         changes["hold_threshold_s"] = float(
             self._adv["hold_threshold_s"].get().replace(",", ".") or 0.35
         )
+        changes["polish_hotkey"] = self._adv["polish_hotkey"].get().strip() or "f8"
         return changes
 
     def _save(self) -> None:
@@ -549,8 +592,14 @@ class SettingsWindow:
             return
         try:
             parse_hotkey(changes["hotkey"])
+            parse_hotkey(changes["polish_hotkey"])
         except HotkeyError as e:
             self._error.config(text=str(e))
+            return
+        if changes["hotkey"] == changes["polish_hotkey"]:
+            self._error.config(
+                text="Diktering och polering kan inte ha samma tangent."
+            )
             return
         error = self._on_save(changes)
         if error:

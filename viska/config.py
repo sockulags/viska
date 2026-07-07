@@ -58,6 +58,14 @@ DEFAULTS = {
         "new line": "\n",
         "new paragraph": "\n\n",
     },
+    # Polering: markera text var som helst, tryck tangenten, få den
+    # omskriven av en lokal LLM. Modellen laddas ner via Inställningar.
+    "polish_hotkey": "f8",
+    # Global uppgiftsbeskrivning (tom = "skriv om till korrekt text").
+    # Per-app-varianter läggs i app_profiles som polish_prompt.
+    "polish_prompt": "",
+    "polish_model_repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
+    "polish_model_file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
     # Dikteringshistorik i traymenyn (hålls enbart i RAM, aldrig på disk).
     "history_size": 20,
     # Kolla efter ny version mot GitHub releases vid start (endast en

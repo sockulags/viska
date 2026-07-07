@@ -28,9 +28,15 @@ GPU_LIB_DIR = CONFIG_DIR / "nvidia"
 # CUDA-DLL:er som är inladdade i processen är låsta och kan inte raderas
 # förrän appen startats om — markören skjuter upp borttagningen dit.
 _REMOVE_MARKER = CONFIG_DIR / "nvidia.remove"
-# ctranslate2 (via faster-whisper) kräver alla tre vid CUDA-körning —
-# cuBLAS/cuDNN laddar i sin tur nvRTC dynamiskt.
-PACKAGES = ("nvidia-cublas-cu12", "nvidia-cudnn-cu12", "nvidia-cuda-nvrtc-cu12")
+# ctranslate2 (via faster-whisper) kräver de tre första vid CUDA-körning
+# (cuBLAS/cuDNN laddar i sin tur nvRTC dynamiskt); cudart behövs av
+# llama.cpp:s CUDA-bygge för poleringsfunktionen.
+PACKAGES = (
+    "nvidia-cublas-cu12",
+    "nvidia-cudnn-cu12",
+    "nvidia-cuda-nvrtc-cu12",
+    "nvidia-cuda-runtime-cu12",
+)
 DOWNLOAD_SIZE_GB = 1.4  # ungefärlig total, för dialogtexter
 
 
@@ -78,6 +84,7 @@ _REQUIRED_DLLS = (
     "cudnn/bin/cudnn64_9.dll",
     "cudnn/bin/cudnn_ops64_9.dll",
     "cuda_nvrtc/bin/nvrtc64_120_0.dll",
+    "cuda_runtime/bin/cudart64_12.dll",
 )
 
 

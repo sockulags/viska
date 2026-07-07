@@ -12,12 +12,17 @@ from pathlib import Path
 
 import numpy as np
 
-from viska import __version__, autostart, commands, gpu, update
+from viska import __version__, autostart, commands, gpu, llm, update
 from viska.audio import SAMPLE_RATE, Recorder
 from viska.config import CONFIG_DIR, CONFIG_PATH, LOG_PATH, load, save
-from viska.focus import foreground_app
-from viska.hotkey import HotkeyError, PushToTalk
-from viska.inject import copy_to_clipboard, inject
+from viska.focus import foreground_app, foreground_is_terminal
+from viska.hotkey import ActionKey, HotkeyError, PushToTalk
+from viska.inject import (
+    copy_to_clipboard,
+    grab_selection,
+    inject,
+    restore_original_clipboard,
+)
 from viska.overlay import BLUE, GRAY, GREEN, RED, Overlay
 from viska.settings import SettingsWindow
 from viska.sounds import Sounds
@@ -68,9 +73,18 @@ class App:
         # återöppnat Inställningar-fönster starta en andra nedladdning som
         # raderar och skriver om samma filer som den första.
         self._gpu_busy = threading.Event()
+        self._llm_busy = threading.Event()
         self.hotkey = PushToTalk(
             cfg["hotkey"], cfg["hold_threshold_s"], self._on_start, self._on_stop
         )
+        self._polisher: llm.Polisher | None = None
+        self._polishing = threading.Event()
+        self.polish_key: ActionKey | None = None
+        try:
+            self.polish_key = ActionKey(cfg["polish_hotkey"], self._on_polish_key)
+        except HotkeyError as e:
+            # Polering är ett tillval — appen ska starta ändå.
+            log.warning("Poleringstangenten kunde inte registreras: %s", e)
         threading.Thread(
             target=self._load_model, args=(self.language,), daemon=True
         ).start()
@@ -362,22 +376,87 @@ class App:
             self._settings.win.lift()
             return
         self._settings = SettingsWindow(
-            self.root, self.cfg, self._apply_settings, gpu_panel=self._gpu_panel()
+            self.root,
+            self.cfg,
+            self._apply_settings,
+            gpu_panel=self._gpu_panel(),
+            polish_panel=self._polish_panel(),
         )
+
+    def _polish_panel(self) -> dict:
+        if self._llm_busy.is_set():
+            return {"state": "Åtgärd pågår…", "kind": "warn", "action": None}
+        key = (self.cfg["polish_hotkey"] or "f8").upper()
+        if llm.model_installed(self.cfg):
+            return {
+                "state": f"installerad – markera text och tryck {key}",
+                "kind": "ok",
+                "action": "remove",
+                "label": "Ta bort poleringsmodellen",
+                "run": self._remove_llm_async,
+            }
+        return {
+            "state": "ej installerad",
+            "kind": "warn",
+            "action": "download",
+            "label": f"Ladda ner poleringsmodell (~{llm.DOWNLOAD_SIZE_GB} GB)",
+            "run": self._download_llm_async,
+        }
+
+    def _download_llm_async(self, progress, done, error) -> None:
+        if self._llm_busy.is_set():
+            error("En åtgärd pågår redan.")
+            return
+        self._llm_busy.set()
+
+        def work():
+            try:
+                llm.download_model(self.cfg, progress=progress)
+                done(f"Poleringsmodellen installerad – markera text och tryck "
+                     f"{self.cfg['polish_hotkey'].upper()}.")
+            except Exception as e:
+                log.exception("Nedladdningen av poleringsmodellen misslyckades")
+                error(f"Misslyckades: {e}")
+            finally:
+                self._llm_busy.clear()
+
+        threading.Thread(target=work, daemon=True, name="viska-llm-dl").start()
+
+    def _remove_llm_async(self, progress, done, error) -> None:
+        if self._llm_busy.is_set():
+            error("En åtgärd pågår redan.")
+            return
+        self._llm_busy.set()
+
+        def work():
+            try:
+                self._polisher = None
+                if llm.remove_model(self.cfg):
+                    done("Poleringsmodellen borttagen.")
+                else:
+                    done("Tas bort vid nästa start (modellen är laddad just nu).")
+            except Exception as e:
+                error(f"Misslyckades: {e}")
+            finally:
+                self._llm_busy.clear()
+
+        threading.Thread(target=work, daemon=True, name="viska-llm-rm").start()
 
     def _gpu_panel(self) -> dict:
         if self._gpu_busy.is_set():
-            return {"state": "GPU-åtgärd pågår…", "action": None}
+            return {"state": "GPU-åtgärd pågår…", "kind": "warn", "action": None}
         t = self.transcribers.get(self.language)
         if t is not None and t.device == "cuda":
             state = "aktivt (CUDA)"
         elif gpu.has_nvidia_gpu():
             state = "NVIDIA-GPU hittad men GPU-läget är inaktivt"
         else:
-            return {"state": "ingen NVIDIA-GPU hittad", "action": None}
+            return {"state": "ingen NVIDIA-GPU hittad", "kind": "warn", "action": None}
+        kind = "ok" if "aktivt" in state else "warn"
         if gpu.downloaded_libs_installed():
             return {
                 "state": state,
+                "kind": kind,
                 "action": "remove",
                 "label": "Ta bort GPU-stöd",
                 "run": self._remove_gpu_async,
@@ -385,15 +464,20 @@ class App:
         if t is not None and t.device == "cuda":
             # CUDA körs redan via systemets/pip:ens bibliotek —
             # en nedladdning vore meningslös.
-            return {"state": state + " – via systemets CUDA", "action": None}
+            return {
+                "state": state + " – via systemets CUDA",
+                "kind": "ok",
+                "action": None,
+            }
         if not gpu.gpu_support_present():
             return {
                 "state": state,
+                "kind": kind,
                 "action": "download",
                 "label": f"Ladda ner GPU-stöd (~{gpu.DOWNLOAD_SIZE_GB} GB)",
                 "run": self._download_gpu_async,
             }
-        return {"state": state, "action": None}
+        return {"state": state, "kind": kind, "action": None}
 
     def _download_gpu_async(self, progress, done, error) -> None:
         if self._gpu_busy.is_set():
@@ -451,29 +535,51 @@ class App:
                 log.exception("Kunde inte ändra autostart")
                 return "Kunde inte ändra Starta med Windows – se loggen"
         old = self.cfg
-        if (
+        if changes["hotkey"] == changes["polish_hotkey"]:
+            return "Diktering och polering kan inte ha samma tangent."
+        keys_changed = (
             changes["hotkey"] != old["hotkey"]
             or changes["hold_threshold_s"] != old["hold_threshold_s"]
-        ):
+            or changes["polish_hotkey"] != old["polish_hotkey"]
+        )
+        if keys_changed:
+            # Atomiskt byte: släpp BÅDA registreringarna först — annars går
+            # det inte att byta plats på tangenterna — registrera nya, och
+            # rulla tillbaka båda om någon misslyckas.
+            self.hotkey.stop()
+            if self.polish_key is not None:
+                self.polish_key.stop()
+                self.polish_key = None
+            new_ptt = new_action = None
             try:
-                new_hotkey = None
-                self.hotkey.stop()  # avregistrera innan samma/ny tangent tas
-                new_hotkey = PushToTalk(
+                new_ptt = PushToTalk(
                     changes["hotkey"],
                     changes["hold_threshold_s"],
                     self._on_start,
                     self._on_stop,
                 )
-                self.hotkey = new_hotkey
+                new_action = ActionKey(changes["polish_hotkey"], self._on_polish_key)
             except HotkeyError as e:
-                if new_hotkey is None:  # återta den gamla tangenten
+                if new_ptt is not None:
+                    new_ptt.stop()
+                try:
                     self.hotkey = PushToTalk(
                         old["hotkey"],
                         old["hold_threshold_s"],
                         self._on_start,
                         self._on_stop,
                     )
+                except HotkeyError:
+                    log.exception("Kunde inte återta dikteringstangenten")
+                try:
+                    self.polish_key = ActionKey(
+                        old["polish_hotkey"], self._on_polish_key
+                    )
+                except HotkeyError:
+                    pass  # polering är ett tillval
                 return str(e)
+            self.hotkey = new_ptt
+            self.polish_key = new_action
         model_changed = (
             changes["model"] != old["model"]
             or changes["model_en"] != old["model_en"]
@@ -504,6 +610,67 @@ class App:
         log.info("Inställningar sparade")
         return None
 
+    # -- Polering (markera text, tryck tangenten) -----------------------------------
+
+    def _on_polish_key(self) -> None:
+        if self._polishing.is_set():
+            return
+        self._polishing.set()
+        threading.Thread(
+            target=self._do_polish, daemon=True, name="viska-polish"
+        ).start()
+
+    def _do_polish(self) -> None:
+        try:
+            if not llm.model_installed(self.cfg):
+                self.overlay.show(
+                    "Polering ej installerad – Inställningar → Polering",
+                    GRAY,
+                    auto_hide_ms=3000,
+                )
+                return
+            if foreground_is_terminal():
+                # Ctrl+C utan markering är SIGINT i konsoler — riskera
+                # aldrig att döda användarens körande process.
+                self.overlay.show(
+                    "Polering stöds inte i terminalfönster", GRAY, auto_hide_ms=2500
+                )
+                return
+            fg = foreground_app()
+            profile = self.cfg["app_profiles"].get(fg, {}) if fg else {}
+            style = profile.get("polish_prompt") or self.cfg["polish_prompt"]
+            text = grab_selection()
+            if not text or not text.strip():
+                restore_original_clipboard()  # rensa ev. sparat original
+                self.overlay.show("(ingen markering)", GRAY, auto_hide_ms=1500)
+                return
+            if self._polisher is None:
+                self.overlay.show("Laddar poleringsmodellen…", GRAY)
+                self._polisher = llm.Polisher(self.cfg)
+            try:
+                self._polisher.ensure_loaded()
+                self.overlay.show("Polerar…", BLUE)
+                result = self._polisher.polish(text, style)
+            except Exception:
+                log.exception("Poleringen misslyckades")
+                restore_original_clipboard()
+                self.sounds.error()
+                self.overlay.show(
+                    "Polering misslyckades – se loggen", RED, auto_hide_ms=4000
+                )
+                return
+            inject(
+                result,
+                profile.get("inject_mode", self.cfg["inject_mode"]),
+                self.cfg["restore_clipboard"],
+            )
+            self.last_text = result
+            self.history.appendleft(result)
+            self._refresh_tray_menu()
+            self.overlay.hide()
+        finally:
+            self._polishing.clear()
+
     def _set_tray_recording(self, recording: bool) -> None:
         if self.icon is not None:
             try:
@@ -517,6 +684,8 @@ class App:
         if self.icon is not None:
             self.icon.stop()
         self.hotkey.stop()
+        if self.polish_key is not None:
+            self.polish_key.stop()
         self._quit.set()
 
     def _poll_quit(self) -> None:
@@ -655,6 +824,7 @@ def main() -> None:
 
     _setup_logging()
     gpu.cleanup_pending_removal()  # före första CUDA-laddningen
+    llm.cleanup_pending_removal()
     first_run = not CONFIG_PATH.exists()
     cfg = load()
 

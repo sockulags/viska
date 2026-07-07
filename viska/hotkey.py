@@ -192,3 +192,54 @@ class PushToTalk:
             # Vänta in avregistreringen — annars kan en ny PushToTalk med
             # samma tangent få "upptagen" av vår egen gamla registrering.
             self._thread.join(timeout=2)
+
+
+class ActionKey:
+    """Enkel åtgärdstangent (t.ex. polering): ett callback per nedtryck,
+    ingen håll/växla-logik. Egen tråd och eget hotkey-id så den samsas
+    med dikteringstangenten."""
+
+    _HOTKEY_ID = 2
+
+    def __init__(self, hotkey: str, on_press):
+        self._mods, self._vk = parse_hotkey(hotkey)
+        self.on_press = on_press
+        self._tid = None
+        self._ready = threading.Event()
+        self._error = None
+        self._thread = threading.Thread(
+            target=self._message_loop, daemon=True, name="viska-actionkey"
+        )
+        self._thread.start()
+        self._ready.wait(timeout=5)
+        if self._error:
+            raise HotkeyError(self._error)
+
+    def _message_loop(self) -> None:
+        self._tid = kernel32.GetCurrentThreadId()
+        if not user32.RegisterHotKey(
+            None, self._HOTKEY_ID, self._mods | MOD_NOREPEAT, self._vk
+        ):
+            self._error = (
+                "Tangenten är upptagen av ett annat program "
+                f"(Win32-fel {ctypes.get_last_error()}). "
+                "Byt 'polish_hotkey' i config.json."
+            )
+            self._ready.set()
+            return
+        self._ready.set()
+        msg = wintypes.MSG()
+        try:
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                if msg.message == WM_HOTKEY and msg.wParam == self._HOTKEY_ID:
+                    try:
+                        self.on_press()
+                    except Exception:
+                        log.exception("Fel i åtgärdstangentens callback")
+        finally:
+            user32.UnregisterHotKey(None, self._HOTKEY_ID)
+
+    def stop(self) -> None:
+        if self._tid:
+            user32.PostThreadMessageW(self._tid, WM_QUIT, 0, 0)
+            self._thread.join(timeout=2)

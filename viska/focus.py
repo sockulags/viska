@@ -41,6 +41,22 @@ def visible_apps() -> list[str]:
     return sorted(names)
 
 
+# Fönsterklasser för konsoler: Ctrl+C utan markering blir SIGINT där och
+# kan döda användarens körande process — poleringen vägrar hellre.
+_TERMINAL_CLASSES = {"ConsoleWindowClass", "CASCADIA_HOSTING_WINDOW_CLASS"}
+_TERMINAL_APPS = {"mintty.exe", "alacritty.exe", "wezterm-gui.exe", "hyper.exe"}
+
+
+def foreground_is_terminal() -> bool:
+    try:
+        hwnd = win32gui.GetForegroundWindow()
+        if hwnd and win32gui.GetClassName(hwnd) in _TERMINAL_CLASSES:
+            return True
+    except Exception:
+        pass
+    return (foreground_app() or "") in _TERMINAL_APPS
+
+
 def foreground_app() -> str | None:
     """Processnamn i gemener för fokuserat fönster, t.ex. "code.exe"."""
     try:

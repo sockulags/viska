@@ -41,6 +41,7 @@ VK_MENU = 0x12  # Alt
 VK_LWIN = 0x5B
 VK_RWIN = 0x5C
 VK_V = 0x56
+VK_C = 0x43
 
 
 class KEYBDINPUT(ctypes.Structure):
@@ -94,20 +95,24 @@ def _send_inputs(inputs: list[INPUT]) -> None:
         log.warning("SendInput skickade %d av %d händelser", sent, len(inputs))
 
 
-def _send_ctrl_v() -> None:
+def _send_ctrl_combo(vk: int) -> None:
     # Fysiskt nedtryckta modifierare (t.ex. om dikteringstangenten är en
-    # kombination) skulle förvandla Ctrl+V till en annan genväg — släpp dem.
-    for vk in (VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN):
-        if user32.GetAsyncKeyState(vk) & 0x8000:
-            _send_inputs([_key_input(vk, up=True, scancode=False)])
+    # kombination) skulle förvandla genvägen till en annan — släpp dem.
+    for held in (VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN):
+        if user32.GetAsyncKeyState(held) & 0x8000:
+            _send_inputs([_key_input(held, up=True, scancode=False)])
     _send_inputs(
         [
             _key_input(VK_CONTROL, up=False),
-            _key_input(VK_V, up=False),
-            _key_input(VK_V, up=True),
+            _key_input(vk, up=False),
+            _key_input(vk, up=True),
             _key_input(VK_CONTROL, up=True),
         ]
     )
+
+
+def _send_ctrl_v() -> None:
+    _send_ctrl_combo(VK_V)
 
 
 # -- Klippbordet ----------------------------------------------------------------
@@ -145,6 +150,15 @@ def _get_clipboard_text() -> str | None:
         win32clipboard.CloseClipboard()
 
 
+def _clear_clipboard() -> None:
+    if not _open_clipboard():
+        return
+    try:
+        win32clipboard.EmptyClipboard()
+    finally:
+        win32clipboard.CloseClipboard()
+
+
 def _set_clipboard_text(text: str, private: bool = False) -> bool:
     if not _open_clipboard():
         log.warning("Kunde inte öppna klippbordet")
@@ -178,6 +192,54 @@ _PASTE_SPACING_S = 0.8
 _last_paste_t = 0.0
 
 
+# Osynlig avskiljare (U+2063) — dyker aldrig upp i riktig text.
+_SENTINEL = "⁣viska-markering⁣"
+
+
+def grab_selection(timeout_s: float = 0.6) -> str | None:
+    """Hämtar markerad text i fokuserat fönster via Ctrl+C.
+
+    Klippbordet sätts först till en vaktpost; ändras den inte inom
+    tidsgränsen fanns ingen markering (originalet läggs då tillbaka
+    direkt). Användarens ursprungliga klippbord sparas för den vanliga
+    fördröjda återställningen efter inklistring.
+    """
+    global _generation, _saved_previous
+    with _clipboard_lock:
+        original = _get_clipboard_text()
+        if _saved_previous is None:
+            _saved_previous = original
+        _generation += 1
+        if not _set_clipboard_text(_SENTINEL, private=True):
+            return None
+        time.sleep(0.05)
+        _send_ctrl_combo(VK_C)
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            time.sleep(0.05)
+            text = _get_clipboard_text()
+            if text is not None and text != _SENTINEL:
+                return text
+        # Ingen markering: lägg tillbaka det SPARADE originalet — inte
+        # ögonblicksbilden från nyss, som kan vara en diktering vars
+        # fördröjda återställning vi just avbröt via generationsräknaren.
+        previous, _saved_previous = _saved_previous, None
+        if previous is not None:
+            _set_clipboard_text(previous)
+        else:
+            _clear_clipboard()  # lämna aldrig kvar vaktposten
+        return None
+
+
+def restore_original_clipboard() -> None:
+    """Läggs originalet tillbaka direkt (poleringen misslyckades)."""
+    global _saved_previous
+    with _clipboard_lock:
+        previous, _saved_previous = _saved_previous, None
+        if previous is not None:
+            _set_clipboard_text(previous)
+
+
 def copy_to_clipboard(text: str) -> None:
     """Vanlig kopiering (traymenyns "Kopiera senaste diktering")."""
     global _generation, _saved_previous
@@ -195,6 +257,10 @@ def inject(text: str, mode: str = "paste", restore_clipboard: bool = True) -> No
         return
     if mode == "type":
         _type(text)
+        # Poleringen kan ha sparat originalet via grab_selection — typläget
+        # rör inte klippbordet så det ska tillbaka nu (annars "återställer"
+        # en senare diktering ett urgammalt värde). No-op vid diktering.
+        restore_original_clipboard()
     else:
         _paste(text, restore_clipboard)
 
@@ -211,6 +277,11 @@ def _paste(text: str, restore: bool) -> None:
             _saved_previous = _get_clipboard_text()
         if not _set_clipboard_text(text, private=True):
             _type(text)  # klippbordet gick inte att ta – skriv i stället
+            # Inklistringen uteblev: konsumera ev. sparat original direkt
+            # (inuti låset — anropa inte restore_original_clipboard här).
+            previous, _saved_previous = _saved_previous, None
+            if previous is not None:
+                _set_clipboard_text(previous)
             return
         time.sleep(0.05)  # låt klippbordet sätta sig innan Ctrl+V
         _send_ctrl_v()

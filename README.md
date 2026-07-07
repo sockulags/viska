@@ -72,6 +72,22 @@ rad för att stänga av den. Obs: radbrytningar i terminaler kan trigga
 **Starta med Windows:** kryssruta i Inställningar → Allmänt (eller
 `--install-autostart` från terminal).
 
+### Polering (AI)
+
+Markera text **var som helst** (även sånt du inte dikterat), tryck
+**F8**, och texten skrivs om av en lokal språkmodell: utfyllnadsord
+bort, grammatik rättad, innebörd bevarad. Med en **poleringsprompt per
+app** blir det riktigt användbart — Outlook-profilen kan säga "omforma
+till ett komplett artigt mejl från Lucas" medan kodredigeraren får
+"gör om till koncis commit-text".
+
+Kräver GPU-läget samt en engångsnedladdning av modellen (~2,4 GB, Qwen3
+4B) via Inställningar → Polering. Allt körs lokalt; första poleringen
+efter start tar några sekunder extra (modellen laddas), därefter under
+en sekund. Obs: en liten modell kan göra små språkliga missar — läs
+igenom innan du skickar något viktigt. Modellen byts under
+`polish_model_repo`/`polish_model_file` i config.
+
 ### Liveläge
 
 Med GPU skrivs texten in **medan du pratar**: varje fras blir färdig när

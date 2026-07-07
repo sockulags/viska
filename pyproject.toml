@@ -13,13 +13,23 @@ dependencies = [
     "pywin32>=306",
     "sv-ttk>=2.6.1",
     "darkdetect>=0.8.0",
+    "llama-cpp-python>=0.3.30",
 ]
 
 [project.optional-dependencies]
 gpu = [
     "nvidia-cublas-cu12",
     "nvidia-cudnn-cu12>=9",
+    "nvidia-cuda-runtime-cu12",
 ]
+
+[tool.uv.sources]
+llama-cpp-python = { index = "llama-cpp-cu124" }
+
+[[tool.uv.index]]
+name = "llama-cpp-cu124"
+url = "https://abetlen.github.io/llama-cpp-python/whl/cu124"
+explicit = true
 
 [project.scripts]
 viska = "viska.app:main"
