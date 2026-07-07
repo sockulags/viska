@@ -100,6 +100,7 @@ class PushToTalk:
 
     def __init__(self, hotkey: str, hold_threshold_s: float, on_start, on_stop):
         self._mods, self._vk = parse_hotkey(hotkey)
+        self._hotkey_str = hotkey
         self.hold_threshold_s = hold_threshold_s
         self.on_start = on_start
         self.on_stop = on_stop
@@ -122,9 +123,9 @@ class PushToTalk:
             None, self._HOTKEY_ID, self._mods | MOD_NOREPEAT, self._vk
         ):
             self._error = (
-                "Tangenten är upptagen av ett annat program "
-                f"(Win32-fel {ctypes.get_last_error()}). "
-                "Byt 'hotkey' i config.json."
+                f"Dikteringstangenten '{self._hotkey_str.upper()}' är upptagen "
+                f"av ett annat program (Win32-fel {ctypes.get_last_error()}). "
+                "Byt den i Inställningar."
             )
             self._ready.set()
             return
@@ -209,6 +210,7 @@ class ActionKey:
 
     def __init__(self, hotkey: str, on_press, on_double=None, double_tap_s: float = 0.4):
         self._mods, self._vk = parse_hotkey(hotkey)
+        self._hotkey_str = hotkey
         self.on_press = on_press
         self.on_double = on_double
         self.double_tap_s = double_tap_s
@@ -233,9 +235,9 @@ class ActionKey:
             None, self._HOTKEY_ID, self._mods | MOD_NOREPEAT, self._vk
         ):
             self._error = (
-                "Tangenten är upptagen av ett annat program "
-                f"(Win32-fel {ctypes.get_last_error()}). "
-                "Byt 'polish_hotkey' i config.json."
+                f"Poleringstangenten '{self._hotkey_str.upper()}' är upptagen "
+                f"av ett annat program (Win32-fel {ctypes.get_last_error()}). "
+                "Byt den i Inställningar."
             )
             self._ready.set()
             return

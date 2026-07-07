@@ -14,7 +14,16 @@ import numpy as np
 
 from viska import __version__, autostart, commands, gpu, llm, update
 from viska.audio import SAMPLE_RATE, Recorder
-from viska.config import CONFIG_DIR, CONFIG_PATH, LOG_PATH, load, save
+from viska.config import (
+    CONFIG_DIR,
+    CONFIG_PATH,
+    LOG_PATH,
+    delete_history,
+    load,
+    load_history,
+    save,
+    save_history,
+)
 from viska.focus import (
     focus_window,
     foreground_app,
@@ -59,6 +68,13 @@ class App:
         self.overlay = Overlay(root, level_source=lambda: self.recorder.level)
         self.tone_menu = ToneMenu(root)
         self.history: deque[str] = deque(maxlen=int(cfg["history_size"]))
+        if cfg["history_persist"]:
+            # Nyast först på disk också — skiva till history_size INNAN
+            # deque-konstruktion: en deque(iterable, maxlen) trunkerar
+            # annars svansen (de äldsta) i stället för att behålla de N
+            # nyaste när den sparade listan är längre än gränsen.
+            persisted = load_history()[: int(cfg["history_size"])]
+            self.history = deque(persisted, maxlen=int(cfg["history_size"]))
         self.update_tag: str | None = None
         self.transcribers: dict[str, Transcriber] = {}
         self.language = cfg["language"] if cfg["language"] in LANG_NAMES else "sv"
@@ -98,9 +114,18 @@ class App:
         # raderar och skriver om samma filer som den första.
         self._gpu_busy = threading.Event()
         self._llm_busy = threading.Event()
-        self.hotkey = PushToTalk(
-            cfg["hotkey"], cfg["hold_threshold_s"], self._on_start, self._on_stop
-        )
+        # Tangentkonflikter (annat program äger tangenten) ska aldrig hindra
+        # appen från att starta — men trayikonen finns inte förrän main()
+        # kört klart make_tray(), så notiserna köas här och flushas därifrån.
+        self._startup_notices: list[str] = []
+        self.hotkey: PushToTalk | None = None
+        try:
+            self.hotkey = PushToTalk(
+                cfg["hotkey"], cfg["hold_threshold_s"], self._on_start, self._on_stop
+            )
+        except HotkeyError as e:
+            log.warning("Dikteringstangenten kunde inte registreras: %s", e)
+            self._startup_notices.append(str(e))
         self._polisher: llm.Polisher | None = None
         # Skapandet av poleringsmodellen serialiseras: både F8-flödet, flow-
         # lägets förladdning och själva flow-poleringen kan annars försöka
@@ -127,12 +152,26 @@ class App:
         except HotkeyError as e:
             # Polering är ett tillval — appen ska starta ändå.
             log.warning("Poleringstangenten kunde inte registreras: %s", e)
+            self._startup_notices.append(str(e))
         threading.Thread(
             target=self._load_model, args=(self.language,), daemon=True
         ).start()
         if cfg["check_updates"]:
             update.check_async(__version__, self._on_update_available)
         self._poll_quit()
+
+    def flush_startup_notices(self) -> None:
+        """Visar traynotiser för tangenter som inte gick att registrera vid
+        start. Kan inte ske i __init__ — trayikonen skapas först efter att
+        App(...) returnerat (se main())."""
+        if self.icon is None:
+            return
+        for msg in self._startup_notices:
+            try:
+                self.icon.notify(msg, "Viska")
+            except Exception:
+                pass  # tray-notiser är kosmetiska, felet finns redan i loggen
+        self._startup_notices.clear()
 
     def _on_update_available(self, tag: str) -> None:
         self.update_tag = tag
@@ -148,6 +187,17 @@ class App:
                 self.icon.update_menu()
             except Exception:
                 pass  # kosmetiskt
+
+    def _remember(self, text: str) -> None:
+        """Lägger till i historiken och, om opt-in-läget är på, sparar den
+        till disk. RAM-listan uppdateras alltid — disksparningen är bara en
+        spegling av den, aldrig den enda källan under körning."""
+        self.history.appendleft(text)
+        if self.cfg["history_persist"]:
+            try:
+                save_history(self.history)
+            except OSError:
+                log.exception("Kunde inte spara historiken till disk")
 
     # -- Modell ------------------------------------------------------------------
 
@@ -172,6 +222,7 @@ class App:
                     self.cfg["device"],
                     self.cfg["beam_size"],
                     self.cfg["compute_type"],
+                    llm.polish_shares_gpu(self.cfg),
                 )
                 t.initial_prompt = self.cfg["initial_prompt"]
                 with self._session_lock:
@@ -368,7 +419,7 @@ class App:
         # force_stop() avgör atomiskt vem som äger stoppet — bara om vi tog
         # en aktiv session får vi anropa _on_stop, annars stoppade
         # användaren precis själv.
-        if self.hotkey.force_stop():
+        if self.hotkey is not None and self.hotkey.force_stop():
             log.info("Maxtid nådd (%s s) – stoppar", self.cfg["max_recording_s"])
             self._on_stop()
 
@@ -442,7 +493,7 @@ class App:
                 return
             if live_texts or text:
                 self.last_text = " ".join([*live_texts, text]).strip()
-                self.history.appendleft(self.last_text)
+                self._remember(self.last_text)
                 self._refresh_tray_menu()
             if not text:
                 if not live_texts and not (too_short or silent):
@@ -488,12 +539,12 @@ class App:
         # Rå först i historiken: kraschar något efter det här går råversionen
         # ändå att hämta via traymenyn.
         self.last_text = raw
-        self.history.appendleft(raw)
+        self._remember(raw)
         self._refresh_tray_menu()
         polished = self._polish_for_flow(raw, polish_prompt, lang)
         if polished and polished.strip() and polished.strip() != raw.strip():
             self.last_text = polished
-            self.history.appendleft(polished)  # polerad överst
+            self._remember(polished)  # polerad överst
             self._refresh_tray_menu()
             out = polished
         else:
@@ -757,7 +808,7 @@ class App:
         # Pågår en diktering avslutas den snyggt först — annars blir
         # sessionen föräldralös när tangenten byts ut (inspelningen skulle
         # aldrig gå att stoppa) och det som sagts hittills ginge förlorat.
-        if self.hotkey.force_stop():
+        if self.hotkey is not None and self.hotkey.force_stop():
             self._on_stop()
         # Autostart är tillstånd (Startup-genvägen), inte config.
         wants_autostart = changes.pop("autostart", None)
@@ -779,7 +830,8 @@ class App:
             # Atomiskt byte: släpp BÅDA registreringarna först — annars går
             # det inte att byta plats på tangenterna — registrera nya, och
             # rulla tillbaka båda om någon misslyckas.
-            self.hotkey.stop()
+            if self.hotkey is not None:
+                self.hotkey.stop()
             if self.polish_key is not None:
                 self.polish_key.stop()
                 self.polish_key = None
@@ -798,8 +850,15 @@ class App:
                     double_tap_s=POLISH_DOUBLE_TAP_S,
                 )
             except HotkeyError as e:
+                log.warning("Tangentbyte misslyckades: %s", e)
+                if self.icon is not None:
+                    try:
+                        self.icon.notify(str(e), "Viska")
+                    except Exception:
+                        pass  # tray-notiser är kosmetiska
                 if new_ptt is not None:
                     new_ptt.stop()
+                self.hotkey = None
                 try:
                     self.hotkey = PushToTalk(
                         old["hotkey"],
@@ -829,8 +888,19 @@ class App:
             or changes["beam_size"] != old["beam_size"]
         )
         mic_changed = changes["keep_mic_open"] != old["keep_mic_open"]
+        history_persist_changed = changes["history_persist"] != old["history_persist"]
         self.cfg.update(changes)
         save(self.cfg)
+        if history_persist_changed:
+            if changes["history_persist"]:
+                # Slås på: spara det som redan finns i RAM direkt, annars
+                # ser filen tom ut tills nästa diktering ändrar historiken.
+                try:
+                    save_history(self.history)
+                except OSError:
+                    log.exception("Kunde inte spara historiken till disk")
+            else:
+                delete_history()
         # Ollama-nåbarheten cachas (flow-beslutet på hotkey-tråden läser
         # cachen i stället för att blocka på nätverket, se __init__). Byter
         # man hit till Ollama-backend måste cachen räknas om NU — annars läser
@@ -1037,14 +1107,14 @@ class App:
                 return
             # Originalet i historiken innan markeringen ersätts — en enkel
             # ångra-väg (traymenyn: klicka för att kopiera tillbaka det).
-            self.history.appendleft(text)
+            self._remember(text)
             inject(
                 result,
                 profile.get("inject_mode", self.cfg["inject_mode"]),
                 self.cfg["restore_clipboard"],
             )
             self.last_text = result
-            self.history.appendleft(result)  # polerat överst
+            self._remember(result)  # polerat överst
             self._refresh_tray_menu()
             self.overlay.hide()
         finally:
@@ -1062,7 +1132,8 @@ class App:
     def quit(self) -> None:
         if self.icon is not None:
             self.icon.stop()
-        self.hotkey.stop()
+        if self.hotkey is not None:
+            self.hotkey.stop()
         if self.polish_key is not None:
             self.polish_key.stop()
         self._quit.set()
@@ -1238,7 +1309,10 @@ def main() -> None:
     if args.check or args.transcribe:
         lang = args.language or cfg["language"]
         model = cfg["model_en"] if lang == "en" else cfg["model"]
-        t = Transcriber(model, cfg["device"], cfg["beam_size"], cfg["compute_type"])
+        t = Transcriber(
+            model, cfg["device"], cfg["beam_size"], cfg["compute_type"],
+            llm.polish_shares_gpu(cfg),
+        )
         print(f"Modell:  {t.model_name}")
         print(f"Enhet:   {t.device}")
         print(f"Config:  {CONFIG_PATH}")
@@ -1266,6 +1340,7 @@ def main() -> None:
         sys.exit(1)
     app.icon = make_tray(app)
     app._refresh_tray_menu()  # fånga status/uppdatering som hann före trayn
+    app.flush_startup_notices()  # tangentkonflikter upptäckta i App.__init__
     log.info("Viska %s igång – tangent: %s", __version__, cfg["hotkey"])
     root.mainloop()
 

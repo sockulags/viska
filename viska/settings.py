@@ -404,12 +404,14 @@ class SettingsWindow:
         self._append = tk.BooleanVar(value=bool(cfg["append_space"]))
         self._keep_mic = tk.BooleanVar(value=bool(cfg["keep_mic_open"]))
         self._updates = tk.BooleanVar(value=bool(cfg["check_updates"]))
+        self._history_persist = tk.BooleanVar(value=bool(cfg["history_persist"]))
         ui.section(advanced, "Beteende")
         for text, var in (
             ("Återställ klippbordet efter inklistring", self._restore),
             ("Mellanslag efter varje diktering", self._append),
             ("Håll mikrofonströmmen öppen (ingen klippt start)", self._keep_mic),
             ("Sök efter uppdateringar vid start", self._updates),
+            ("Spara historik på disk (annars bara i minnet)", self._history_persist),
         ):
             ttk.Checkbutton(advanced, text=text, variable=var).pack(
                 anchor="w", pady=1
@@ -633,6 +635,7 @@ class SettingsWindow:
             "append_space": self._append.get(),
             "keep_mic_open": self._keep_mic.get(),
             "check_updates": self._updates.get(),
+            "history_persist": self._history_persist.get(),
         }
         if self._feel.get() in FEELS:
             interval, silence = FEELS[self._feel.get()]

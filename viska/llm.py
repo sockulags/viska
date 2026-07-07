@@ -79,6 +79,20 @@ def installed(cfg: dict) -> bool:
     return model_installed(cfg) and runtime_installed()
 
 
+def polish_shares_gpu(cfg: dict) -> bool:
+    """Delar poleringen samma lokala VRAM-budget som Whisper just nu?
+
+    Bara den inbyggda motorn gör det säkert – den laddas i samma process
+    på samma GPU (Qwen3-4B, ~2,4 GB). Ollama-backendens modell kan vara
+    valfri storlek och köra på en annan maskin (polish_ollama_url), så
+    den räknas inte in i Whispers kvantiseringsval."""
+    return (
+        cfg["polish_backend"] == "builtin"
+        and model_installed(cfg)
+        and runtime_installed()
+    )
+
+
 # -- Ollama-backend: återanvänd en körande Ollama och dess modeller ------------
 
 

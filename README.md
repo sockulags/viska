@@ -48,9 +48,9 @@ kodredigerare. En remsa nertill på skärmen visar läget (spelar in /
 transkriberar) och korta pip markerar start och stopp.
 
 **Traymenyn** (högerklick på ikonen; röd under inspelning): Inställningar,
-historik (senaste dikteringarna, klicka för att kopiera — hålls enbart i
-RAM), växla svenska/engelska, byta mikrofon, avsluta. Finns en ny version
-på GitHub visas en hämta-rad överst.
+historik (senaste dikteringarna, klicka för att kopiera — hålls i RAM som
+standard, se Integritet), växla svenska/engelska, byta mikrofon, avsluta.
+Finns en ny version på GitHub visas en hämta-rad överst.
 
 **Inställningarna** har tre flikar: *Allmänt* (språk, tangent med
 tryck-för-att-välja, livekänsla Lugn/Normal/Snabb, kvalitet i klartext,
@@ -147,6 +147,8 @@ efter ändringar):
 | `input_device` | `null` | `null` = standardmikrofon, annars index från `--list-devices` |
 | `keep_mic_open` | `true` | Öppen mikrofonström = ingen klippt första stavelse |
 | `sounds` | `true` | Pip vid start/stopp |
+| `history_size` | `20` | Antal dikteringar i traymenyns historik |
+| `history_persist` | `false` | Spara historiken till `history.json` (se Integritet) i stället för bara RAM |
 
 ## Autostart
 
@@ -172,6 +174,11 @@ dikteringen körs mot den tills du växlar tillbaka.
   **inte** synkas via molnklippbordet.
 - Med `keep_mic_open` lyssnar mikrofonströmmen bara in i en ringbuffert
   på ~0,5 sekunder i RAM som ständigt skrivs över; inget sparas.
+- **Historiken hålls i RAM som standard** och försvinner vid omstart.
+  Kryssrutan "Spara historik på disk" i Inställningar → Avancerat är ett
+  uttryckligt val (av som standard): på skrivs den till
+  `%APPDATA%\viska\history.json` vid varje ändring och läses in igen vid
+  start; stängs den av raderas filen om den finns.
 
 ## Felsökning
 
@@ -185,7 +192,8 @@ dikteringen körs mot den tills du växlar tillbaka.
 - **Ctrl+V fungerar inte i vissa terminaler/TUI-program**: sätt
   `inject_mode` till `"type"`.
 - **Tangenten reagerar inte**: något annat program äger genvägen
-  (RegisterHotKey). Byt `hotkey` i config.
+  (RegisterHotKey) — en traynotis och en rad i loggen talar om vilken
+  tangent det gäller. Appen startar ändå; byt tangenten i Inställningar.
 - **Fel mikrofon efter dockning/headsetbyte**: traymenyn → "Byt till ny
   standardmikrofon".
 

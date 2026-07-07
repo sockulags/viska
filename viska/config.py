@@ -2,12 +2,14 @@
 
 import json
 import os
+from collections.abc import Iterable
 from pathlib import Path
 
 APP_NAME = "viska"
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / APP_NAME
 CONFIG_PATH = CONFIG_DIR / "config.json"
 LOG_PATH = CONFIG_DIR / "viska.log"
+HISTORY_PATH = CONFIG_DIR / "history.json"
 
 DEFAULTS = {
     # Tangent som styr dikteringen. Kort tryck = starta/stoppa,
@@ -82,8 +84,12 @@ DEFAULTS = {
     # app_profiles. Är poleringen otillgänglig, kastar fel eller tar för
     # lång tid skrivs råtexten in precis som vanlig diktering.
     "flow": False,
-    # Dikteringshistorik i traymenyn (hålls enbart i RAM, aldrig på disk).
+    # Dikteringshistorik i traymenyn. Hålls enbart i RAM som standard —
+    # "history_persist" (kryssruta i Inställningar → Avancerat) sparar den
+    # i stället till history.json vid varje ändring och läser in den igen
+    # vid start.
     "history_size": 20,
+    "history_persist": False,
     # Kolla efter ny version mot GitHub releases vid start (endast en
     # versionssiffra hämtas; ingen data skickas).
     "check_updates": True,
@@ -121,3 +127,27 @@ def save(cfg: dict) -> None:
     CONFIG_PATH.write_text(
         json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+
+
+def load_history() -> list[str]:
+    """Sparad historik (nyast först), eller tom lista om opt-in-läget är
+    avstängt, filen saknas, eller är trasig."""
+    if not HISTORY_PATH.exists():
+        return []
+    try:
+        data = json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+        return [str(x) for x in data] if isinstance(data, list) else []
+    except (json.JSONDecodeError, OSError):
+        return []  # trasig fil: kör vidare utan historik, skriv inte över
+
+
+def save_history(items: Iterable[str]) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    HISTORY_PATH.write_text(
+        json.dumps(list(items), indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def delete_history() -> None:
+    """Körs när opt-in-läget stängs av — filen ska inte bli kvar på disk."""
+    HISTORY_PATH.unlink(missing_ok=True)
