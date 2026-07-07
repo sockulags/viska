@@ -39,22 +39,28 @@ def _add_nvidia_dll_dirs() -> None:
 
 
 class Transcriber:
-    def __init__(self, model: str = "auto", device: str = "auto", beam_size=None):
+    def __init__(
+        self,
+        model: str = "auto",
+        device: str = "auto",
+        beam_size=None,
+        compute_type=None,
+    ):
         self.model_name = None
         self.device = None
         self.beam_size = None
-        self._requested = (model, device, beam_size)
+        self._requested = (model, device, beam_size, compute_type)
         self._model = self._load()
 
     def _load(self):
         from faster_whisper import WhisperModel
 
-        model, device, beam_size = self._requested
+        model, device, beam_size, compute_type = self._requested
         devices = ["cuda", "cpu"] if device == "auto" else [device]
         last_error = None
         for dev in devices:
             name = AUTO_MODELS[dev] if model == "auto" else model
-            compute = "float16" if dev == "cuda" else "int8"
+            compute = compute_type or ("float16" if dev == "cuda" else "int8")
             try:
                 if dev == "cuda":
                     _add_nvidia_dll_dirs()

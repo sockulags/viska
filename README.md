@@ -64,6 +64,7 @@ efter ändringar):
 | `model_en` | `"large-v3-turbo"` | Modell för engelska (laddas vid språkbyte) |
 | `language` | `"sv"` | Aktivt språk; växlas enklast i traymenyn |
 | `device` | `"auto"` | `auto`/`cuda`/`cpu` |
+| `compute_type` | `null` | `null` = float16 på GPU, int8 på CPU. `"int8_float16"` halverar VRAM på GPU |
 | `beam_size` | `null` | `null` = 5 på GPU, 2 på CPU |
 | `inject_mode` | `"paste"` | `paste` (klippbord+Ctrl+V) eller `type` (tecken för tecken) |
 | `restore_clipboard` | `true` | Återställ gamla klippbordet efter inklistring |

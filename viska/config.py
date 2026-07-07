@@ -27,6 +27,9 @@ DEFAULTS = {
     "language": "sv",
     # "auto" provar GPU först och faller tillbaka på CPU. Även "cuda"/"cpu".
     "device": "auto",
+    # null = float16 på GPU, int8 på CPU. "int8_float16" halverar VRAM på
+    # GPU (~2 GB för large i stället för ~4 GB) med minimal kvalitetsförlust.
+    "compute_type": None,
     # null = 5 på GPU, 2 på CPU (lägre = snabbare, marginellt sämre).
     "beam_size": None,
     # "paste" klistrar in via klippbordet (snabbast, säkrast för åäö).

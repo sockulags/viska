@@ -65,7 +65,12 @@ class App:
         )
         try:
             model = self.cfg["model"] if lang == "sv" else self.cfg["model_en"]
-            t = Transcriber(model, self.cfg["device"], self.cfg["beam_size"])
+            t = Transcriber(
+                model,
+                self.cfg["device"],
+                self.cfg["beam_size"],
+                self.cfg["compute_type"],
+            )
             self.transcribers[lang] = t
             self.status = f"redo – {t.model_name} ({t.device})"
             self.overlay.show(
@@ -345,7 +350,7 @@ def main() -> None:
     if args.check or args.transcribe:
         lang = args.language or cfg["language"]
         model = cfg["model_en"] if lang == "en" else cfg["model"]
-        t = Transcriber(model, cfg["device"], cfg["beam_size"])
+        t = Transcriber(model, cfg["device"], cfg["beam_size"], cfg["compute_type"])
         print(f"Modell:  {t.model_name}")
         print(f"Enhet:   {t.device}")
         print(f"Config:  {CONFIG_PATH}")
