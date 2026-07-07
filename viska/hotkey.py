@@ -197,16 +197,28 @@ class PushToTalk:
 class ActionKey:
     """Enkel åtgärdstangent (t.ex. polering): ett callback per nedtryck,
     ingen håll/växla-logik. Egen tråd och eget hotkey-id så den samsas
-    med dikteringstangenten."""
+    med dikteringstangenten.
+
+    Anges on_double skiljs dessutom enkel- från dubbeltryck: ett andra
+    tryck inom double_tap_s räknas som dubbeltryck (on_double), annars
+    fördröjs enkeltrycket (on_press) tills fönstret gått ut så trycken
+    kan skiljas åt. Utan on_double sker inget dubbeltrycksfönster och
+    on_press körs direkt vid varje nedtryck (noll extra fördröjning)."""
 
     _HOTKEY_ID = 2
 
-    def __init__(self, hotkey: str, on_press):
+    def __init__(self, hotkey: str, on_press, on_double=None, double_tap_s: float = 0.4):
         self._mods, self._vk = parse_hotkey(hotkey)
         self.on_press = on_press
+        self.on_double = on_double
+        self.double_tap_s = double_tap_s
         self._tid = None
         self._ready = threading.Event()
         self._error = None
+        # Skyddar dubbeltrycksfönstret; enkeltrycket levereras från en Timer-
+        # tråd medan dubbeltrycket levereras från meddelandeloopen.
+        self._tap_lock = threading.Lock()
+        self._pending = None  # Timer som väntar in ett eventuellt andra tryck
         self._thread = threading.Thread(
             target=self._message_loop, daemon=True, name="viska-actionkey"
         )
@@ -233,13 +245,49 @@ class ActionKey:
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
                 if msg.message == WM_HOTKEY and msg.wParam == self._HOTKEY_ID:
                     try:
-                        self.on_press()
+                        self._on_hotkey_down()
                     except Exception:
                         log.exception("Fel i åtgärdstangentens callback")
         finally:
             user32.UnregisterHotKey(None, self._HOTKEY_ID)
 
+    def _on_hotkey_down(self) -> None:
+        if self.on_double is None:
+            self.on_press()  # inget dubbeltryck att skilja på — kör direkt
+            return
+        fire_double = False
+        with self._tap_lock:
+            if self._pending is not None:
+                # Andra trycket inom fönstret: dubbeltryck. Avbryt den
+                # väntande enkeltryckstimern.
+                self._pending.cancel()
+                self._pending = None
+                fire_double = True
+            else:
+                self._pending = threading.Timer(
+                    self.double_tap_s, self._single_expired
+                )
+                self._pending.daemon = True
+                self._pending.start()
+        if fire_double:
+            self.on_double()
+
+    def _single_expired(self) -> None:
+        # Timern gick ut utan ett andra tryck: det var ett enkeltryck.
+        with self._tap_lock:
+            if self._pending is None:
+                return  # hann bli dubbeltryck (eller stoppades)
+            self._pending = None
+        try:
+            self.on_press()
+        except Exception:
+            log.exception("Fel i åtgärdstangentens callback")
+
     def stop(self) -> None:
+        with self._tap_lock:
+            if self._pending is not None:
+                self._pending.cancel()
+                self._pending = None
         if self._tid:
             user32.PostThreadMessageW(self._tid, WM_QUIT, 0, 0)
             self._thread.join(timeout=2)

@@ -28,7 +28,7 @@ from viska.inject import (
     inject,
     restore_original_clipboard,
 )
-from viska.overlay import BLUE, GRAY, GREEN, RED, Overlay
+from viska.overlay import BLUE, GRAY, GREEN, RED, Overlay, ToneMenu
 from viska.settings import SettingsWindow
 from viska.sounds import Sounds
 from viska.stream import LiveWorker
@@ -42,6 +42,11 @@ LANG_NAMES = {"sv": "svensk", "en": "engelsk"}
 # stället. Diktering får aldrig blockeras av en trög eller hängande modell.
 FLOW_POLISH_TIMEOUT_S = 10.0
 
+# Poleringstangenten: två tryck inom det här fönstret öppnar tonvalsmenyn i
+# stället för att polera direkt. Ett enkeltryck fördröjs så länge (och bara så
+# länge) så trycken kan skiljas åt — ingen annan extra fördröjning.
+POLISH_DOUBLE_TAP_S = 0.4
+
 
 class App:
     def __init__(self, root: tk.Tk, cfg: dict):
@@ -52,6 +57,7 @@ class App:
             cfg["input_device"], cfg["keep_mic_open"], cfg["preroll_s"]
         )
         self.overlay = Overlay(root, level_source=lambda: self.recorder.level)
+        self.tone_menu = ToneMenu(root)
         self.history: deque[str] = deque(maxlen=int(cfg["history_size"]))
         self.update_tag: str | None = None
         self.transcribers: dict[str, Transcriber] = {}
@@ -112,7 +118,12 @@ class App:
             ).start()
         self.polish_key: ActionKey | None = None
         try:
-            self.polish_key = ActionKey(cfg["polish_hotkey"], self._on_polish_key)
+            self.polish_key = ActionKey(
+                cfg["polish_hotkey"],
+                self._on_polish_key,
+                on_double=self._on_polish_menu,
+                double_tap_s=POLISH_DOUBLE_TAP_S,
+            )
         except HotkeyError as e:
             # Polering är ett tillval — appen ska starta ändå.
             log.warning("Poleringstangenten kunde inte registreras: %s", e)
@@ -427,7 +438,7 @@ class App:
                 # skriva in före den polerade texten, och fönstret dikteringen
                 # gällde behåller fokus. Poleringen har en hård tidsgräns
                 # (FLOW_POLISH_TIMEOUT_S) så väntan aldrig blir oändlig.
-                self._finish_flow(text, inject_mode, polish_prompt, target_hwnd)
+                self._finish_flow(text, inject_mode, polish_prompt, target_hwnd, lang)
                 return
             if live_texts or text:
                 self.last_text = " ".join([*live_texts, text]).strip()
@@ -457,7 +468,12 @@ class App:
     # -- Flow-läge (automatisk polering före inskrivning) ---------------------------
 
     def _finish_flow(
-        self, raw: str, inject_mode: str, polish_prompt: str, target_hwnd: int | None
+        self,
+        raw: str,
+        inject_mode: str,
+        polish_prompt: str,
+        target_hwnd: int | None,
+        lang: str = "sv",
     ) -> None:
         """Polerar hela dikteringen och skriver in resultatet på en gång.
         Körs synkront på transkriberingstråden med _transcribing kvar satt:
@@ -474,7 +490,7 @@ class App:
         self.last_text = raw
         self.history.appendleft(raw)
         self._refresh_tray_menu()
-        polished = self._polish_for_flow(raw, polish_prompt)
+        polished = self._polish_for_flow(raw, polish_prompt, lang)
         if polished and polished.strip() and polished.strip() != raw.strip():
             self.last_text = polished
             self.history.appendleft(polished)  # polerad överst
@@ -492,7 +508,7 @@ class App:
         inject(out, inject_mode, self.cfg["restore_clipboard"])
         self.overlay.hide()
 
-    def _polish_for_flow(self, text: str, style: str) -> str | None:
+    def _polish_for_flow(self, text: str, style: str, lang: str = "sv") -> str | None:
         """Polerar text med hård tidsgräns. Returnerar den polerade texten,
         eller None om poleringen är otillgänglig, misslyckas eller tar mer än
         FLOW_POLISH_TIMEOUT_S sekunder (då skrivs råtexten in)."""
@@ -504,11 +520,11 @@ class App:
         def work():
             try:
                 if self.cfg["polish_backend"] == "ollama":
-                    result["text"] = llm.polish_ollama(self.cfg, text, style)
+                    result["text"] = llm.polish_ollama(self.cfg, text, style, lang)
                 else:
                     polisher = self._get_polisher()
                     polisher.ensure_loaded()
-                    result["text"] = polisher.polish(text, style)
+                    result["text"] = polisher.polish(text, style, lang)
             except Exception:
                 log.exception("Flow-poleringen misslyckades – skriver in råtext")
 
@@ -775,7 +791,12 @@ class App:
                     self._on_start,
                     self._on_stop,
                 )
-                new_action = ActionKey(changes["polish_hotkey"], self._on_polish_key)
+                new_action = ActionKey(
+                    changes["polish_hotkey"],
+                    self._on_polish_key,
+                    on_double=self._on_polish_menu,
+                    double_tap_s=POLISH_DOUBLE_TAP_S,
+                )
             except HotkeyError as e:
                 if new_ptt is not None:
                     new_ptt.stop()
@@ -790,7 +811,10 @@ class App:
                     log.exception("Kunde inte återta dikteringstangenten")
                 try:
                     self.polish_key = ActionKey(
-                        old["polish_hotkey"], self._on_polish_key
+                        old["polish_hotkey"],
+                        self._on_polish_key,
+                        on_double=self._on_polish_menu,
+                        double_tap_s=POLISH_DOUBLE_TAP_S,
                     )
                 except HotkeyError:
                     pass  # polering är ett tillval
@@ -841,14 +865,59 @@ class App:
     # -- Polering (markera text, tryck tangenten) -----------------------------------
 
     def _on_polish_key(self) -> None:
+        # Enkeltryck: polera direkt med den fokuserade appens ton (dagens
+        # beteende). Fördröjs bara av dubbeltrycksfönstret i ActionKey.
+        self._start_polish()
+
+    def _on_polish_menu(self) -> None:
+        """Dubbeltryck: öppna tonvalsmenyn nära pillen. Körs på hotkey-tråden
+        och måste vara snabb — fånga målfönster och app NU (innan menyn tar
+        fokus) och lämna själva menyn till huvudtråden via ToneMenu. Valet
+        gäller bara den poleringen; ingen config ändras."""
+        if self._polishing.is_set():
+            return  # en polering pågår redan
+        if foreground_is_terminal():
+            # Ctrl+C utan markering blir SIGINT i konsoler — ingen meny där.
+            self.overlay.show(
+                "Polering stöds inte i terminalfönster", GRAY, auto_hide_ms=2500
+            )
+            return
+        # Målfönstret måste fångas här: när menyn tagit fokus är förgrunden
+        # menyn, inte appen markeringen finns i. _do_polish lämnar tillbaka
+        # fokus dit innan markeringen läses.
+        target_hwnd = foreground_window()
+        fg = foreground_app()
+        profile = self.cfg["app_profiles"].get(fg, {}) if fg else {}
+        app_default = profile.get("polish_prompt") or self.cfg["polish_prompt"]
+        # Appens standard förmarkerad (style None = härleds i _do_polish, exakt
+        # som enkeltryck); sedan de fördefinierade tonerna på aktivt språk.
+        label = "Appens standard" if app_default else "Standard (allmän)"
+        options = [(label, None, True)]
+        options += [
+            (name, task, False) for name, task in llm.tone_presets(self.language)
+        ]
+
+        def on_choose(style):
+            self._start_polish(style=style, target_hwnd=target_hwnd)
+
+        self.tone_menu.show(options, on_choose)
+
+    def _start_polish(
+        self, style: str | None = None, target_hwnd: int | None = None
+    ) -> None:
         if self._polishing.is_set():
             return
         self._polishing.set()
         threading.Thread(
-            target=self._do_polish, daemon=True, name="viska-polish"
+            target=self._do_polish,
+            args=(style, target_hwnd),
+            daemon=True,
+            name="viska-polish",
         ).start()
 
-    def _do_polish(self) -> None:
+    def _do_polish(
+        self, style: str | None = None, target_hwnd: int | None = None
+    ) -> None:
         try:
             if not llm.installed(self.cfg):
                 self.overlay.show(
@@ -857,6 +926,11 @@ class App:
                     auto_hide_ms=3000,
                 )
                 return
+            # Tog tonvalsmenyn fokus (dubbeltryck) lämnas det tillbaka till
+            # fönstret markeringen finns i innan vi läser den. Enkeltryck
+            # (target_hwnd None) rör aldrig fokus — ingen fokusstöld.
+            if target_hwnd:
+                focus_window(target_hwnd)
             if foreground_is_terminal():
                 # Ctrl+C utan markering är SIGINT i konsoler — riskera
                 # aldrig att döda användarens körande process.
@@ -866,7 +940,9 @@ class App:
                 return
             fg = foreground_app()
             profile = self.cfg["app_profiles"].get(fg, {}) if fg else {}
-            style = profile.get("polish_prompt") or self.cfg["polish_prompt"]
+            if style is None:
+                # Appens egen ton — samma väg som enkeltryck och flow väljer.
+                style = profile.get("polish_prompt") or self.cfg["polish_prompt"]
             text = grab_selection()
             if not text or not text.strip():
                 restore_original_clipboard()  # rensa ev. sparat original
@@ -875,14 +951,14 @@ class App:
             try:
                 if self.cfg["polish_backend"] == "ollama":
                     self.overlay.show("Polerar via Ollama…", BLUE)
-                    result = llm.polish_ollama(self.cfg, text, style)
+                    result = llm.polish_ollama(self.cfg, text, style, self.language)
                 else:
                     if self._polisher is None:
                         self.overlay.show("Laddar poleringsmodellen…", GRAY)
                     polisher = self._get_polisher()
                     polisher.ensure_loaded()
                     self.overlay.show("Polerar…", BLUE)
-                    result = polisher.polish(text, style)
+                    result = polisher.polish(text, style, self.language)
             except Exception:
                 log.exception("Poleringen misslyckades")
                 restore_original_clipboard()
@@ -891,13 +967,16 @@ class App:
                     "Polering misslyckades – se loggen", RED, auto_hide_ms=4000
                 )
                 return
+            # Originalet i historiken innan markeringen ersätts — en enkel
+            # ångra-väg (traymenyn: klicka för att kopiera tillbaka det).
+            self.history.appendleft(text)
             inject(
                 result,
                 profile.get("inject_mode", self.cfg["inject_mode"]),
                 self.cfg["restore_clipboard"],
             )
             self.last_text = result
-            self.history.appendleft(result)
+            self.history.appendleft(result)  # polerat överst
             self._refresh_tray_menu()
             self.overlay.hide()
         finally:

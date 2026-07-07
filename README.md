@@ -81,6 +81,17 @@ app** blir det riktigt användbart — Outlook-profilen kan säga "omforma
 till ett komplett artigt mejl från Lucas" medan kodredigeraren får
 "gör om till koncis commit-text".
 
+**Välj ton för en enskild polering:** tryck **F8 två gånger snabbt** så
+dyker en liten meny upp vid pillen med *Appens standard* (förvald),
+*Neutral*, *Mejl*, *Commit-text* och *Kortfattat*. Valet gäller bara den
+poleringen — inga inställningar ändras. Esc eller klick utanför stänger
+menyn.
+
+Originaltexten läggs i historiken innan den ersätts, så en polering du
+inte gillar går att ångra: öppna traymenyns historik och klicka på
+originalet för att kopiera tillbaka det. Poleringen följer aktivt språk —
+är engelska valt (traymenyn) skrivs texten om på och behåller engelska.
+
 Kräver GPU-läget samt en engångsnedladdning av modellen (~2,4 GB, Qwen3
 4B) via Inställningar → Polering. Allt körs lokalt; första poleringen
 efter start tar några sekunder extra (modellen laddas), därefter under

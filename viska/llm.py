@@ -92,13 +92,13 @@ def ollama_reachable(cfg: dict) -> bool:
         return False
 
 
-def polish_ollama(cfg: dict, text: str, style: str = "") -> str:
+def polish_ollama(cfg: dict, text: str, style: str = "", lang: str = "sv") -> str:
     import json
 
     body = {
         "model": cfg["polish_ollama_model"],
         "messages": [
-            {"role": "system", "content": _system_prompt(style)},
+            {"role": "system", "content": _system_prompt(style, lang)},
             {"role": "user", "content": text},
         ],
         "stream": False,
@@ -274,7 +274,48 @@ def cleanup_pending_removal() -> None:
         _REMOVE_MARKER.unlink(missing_ok=True)
 
 
-def _system_prompt(style: str) -> str:
+# Fördefinierade toner för tonvalsmenyn (F8-dubbeltryck). Uppgiften
+# formuleras på aktivt språk så modellen bevarar det språket. Etiketterna
+# är alltid svenska (appens språk); "Appens standard" läggs till av
+# anroparen och använder appens egen polish_prompt.
+_TONE_PRESETS = {
+    "sv": [
+        ("Neutral", "Skriv om texten till korrekt, naturlig text med samma innebörd och ton."),
+        ("Mejl", "Skriv om texten till ett artigt och välformulerat mejl."),
+        ("Commit-text", "Skriv om texten till en kortfattad commit-text i imperativ."),
+        ("Kortfattat", "Skriv om texten så kort och koncist som möjligt utan att innebörden tappas."),
+    ],
+    "en": [
+        ("Neutral", "Rewrite the text into correct, natural text with the same meaning and tone."),
+        ("Mejl", "Rewrite the text into a polite, well-formed email."),
+        ("Commit-text", "Rewrite the text into a concise git commit message in the imperative mood."),
+        ("Kortfattat", "Rewrite the text to be as short and concise as possible without losing the meaning."),
+    ],
+}
+
+
+def tone_presets(lang: str) -> list[tuple[str, str]]:
+    """Toner (etikett, uppgift) för tonvalsmenyn på aktivt språk."""
+    return _TONE_PRESETS.get(lang, _TONE_PRESETS["sv"])
+
+
+def _system_prompt(style: str, lang: str = "sv") -> str:
+    if lang == "en":
+        task = (
+            style.strip()
+            or "Rewrite the text into correct, natural text with the same meaning and tone."
+        )
+        return (
+            "You are a text editor.\n"
+            f"TASK: {task}\n"
+            "Rules that always apply:\n"
+            "- Remove all filler words (um, uh, like, you know, kind of).\n"
+            "- Fix grammar and spelling. Keep the language of the text (English).\n"
+            "- NEVER change dates, names, numbers or facts — "
+            "'tomorrow' stays 'tomorrow'.\n"
+            "- Do not invent new information and never use placeholders.\n"
+            "- Reply with the result only, no explanation."
+        )
     task = (
         style.strip()
         or "Skriv om texten till korrekt, naturlig text med samma innebörd och ton."
@@ -329,12 +370,12 @@ class Polisher:
             )
             log.info("Poleringsmodellen redo")
 
-    def polish(self, text: str, style: str = "") -> str:
+    def polish(self, text: str, style: str = "", lang: str = "sv") -> str:
         self.ensure_loaded()
         with self._lock:
             out = self._llm.create_chat_completion(
                 messages=[
-                    {"role": "system", "content": _system_prompt(style)},
+                    {"role": "system", "content": _system_prompt(style, lang)},
                     {"role": "user", "content": text},
                 ],
                 # Girig avkodning: mest texttrogna omskrivningen — 4B-modeller

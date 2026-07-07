@@ -15,6 +15,8 @@ import ctypes
 import queue
 import tkinter as tk
 
+from viska import ui
+
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 
 GWL_EXSTYLE = -20
@@ -25,6 +27,11 @@ DWMWCP_ROUND = 2
 
 _POLL_MS = 50
 _BARS = 5
+# Tonvalsmenyn stängs normalt med Esc, klick på ett val eller klick utanför.
+# Skulle den mot förmodan inte få tangentfokus (fokus/klick-utanför slutar då
+# stänga den) städas den bort av den här säkerhetstimern så inget topmost-
+# fönster kan bli kvarhängande.
+_TONE_MENU_TIMEOUT_MS = 6000
 
 RED = "#c0392b"
 BLUE = "#2980b9"
@@ -153,3 +160,132 @@ class Overlay:
             self._meter.create_rectangle(
                 x, 18 - h, x + 3, 18, fill="white", outline=""
             )
+
+
+class ToneMenu:
+    """Liten meny nära statuspillen för val av poleringston vid F8-dubbeltryck.
+
+    Samma trådmönster som Overlay: tkinter är huvudtrådsbundet, så begäran
+    läggs i en kö som huvudtråden tömmer — menyn skapas och stängs alltid i
+    huvudtråden. Till skillnad från pillen TAR menyn tangentfokus (den ska
+    fånga Esc och klick utanför); anroparen återställer själv fokus till
+    målfönstret innan markeringen läses. Valet gäller bara den poleringen och
+    levereras via on_choose(style)."""
+
+    def __init__(self, root: tk.Tk):
+        self._root = root
+        self._queue: queue.Queue = queue.Queue()
+        self._win: tk.Toplevel | None = None
+        self._on_choose = None
+        self._timeout_job = None
+        self._poll()
+
+    # -- Trådsäkra metoder ------------------------------------------------------
+
+    def show(self, options, on_choose) -> None:
+        """options: lista av (etikett, style, is_default). style None = appens
+        standardton. on_choose(style) anropas i huvudtråden vid val. Trådsäker
+        — kan anropas från hotkey-tråden."""
+        self._queue.put((options, on_choose))
+
+    def close(self) -> None:
+        self._queue.put((None, None))
+
+    # -- Körs i huvudtråden -----------------------------------------------------
+
+    def _poll(self) -> None:
+        try:
+            while True:
+                options, on_choose = self._queue.get_nowait()
+                if options is None:
+                    self._close()
+                else:
+                    self._open(options, on_choose)
+        except queue.Empty:
+            pass
+        self._root.after(_POLL_MS, self._poll)
+
+    def _open(self, options, on_choose) -> None:
+        self._close()
+        self._on_choose = on_choose
+        pal = ui.palette()
+        win = tk.Toplevel(self._root)
+        self._win = win
+        win.withdraw()
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        # Tunn kant runt panelen: en yttre ram i kantfärg med panelen 1 px in.
+        outer = tk.Frame(win, bg=pal["border"])
+        outer.pack(fill="both", expand=True)
+        frame = tk.Frame(outer, bg=pal["surface"], padx=4, pady=4)
+        frame.pack(fill="both", expand=True, padx=1, pady=1)
+        tk.Label(
+            frame,
+            text="Polera med ton",
+            bg=pal["surface"],
+            fg=pal["muted"],
+            font=("Segoe UI", 8, "bold"),
+            anchor="w",
+            padx=10,
+            pady=2,
+        ).pack(fill="x", pady=(2, 6))
+        for label, style, is_default in options:
+            base_bg = pal["surface"]
+            base_fg = pal["accent"] if is_default else pal["text"]
+            row = tk.Label(
+                frame,
+                text=("● " + label) if is_default else ("    " + label),
+                bg=base_bg,
+                fg=base_fg,
+                font=("Segoe UI", 10, "bold" if is_default else "normal"),
+                anchor="w",
+                padx=12,
+                pady=6,
+                cursor="hand2",
+            )
+            row.pack(fill="x")
+            row.bind(
+                "<Enter>",
+                lambda _e, r=row: r.config(bg=pal["accent"], fg=pal["accent_fg"]),
+            )
+            row.bind(
+                "<Leave>",
+                lambda _e, r=row, b=base_bg, f=base_fg: r.config(bg=b, fg=f),
+            )
+            row.bind("<Button-1>", lambda _e, s=style: self._choose(s))
+        win.update_idletasks()
+        w = win.winfo_reqwidth()
+        h = win.winfo_reqheight()
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+        # Centrerad, strax ovanför pillen (som ligger på sh - h - 80).
+        win.geometry(f"+{(sw - w) // 2}+{sh - h - 130}")
+        _round_corners(user32.GetParent(win.winfo_id()) or win.winfo_id())
+        win.bind("<Escape>", lambda _e: self._close())
+        # Klick utanför menyn (den tappar då fokus) stänger den.
+        win.bind("<FocusOut>", lambda _e: self._close())
+        win.deiconify()
+        win.lift()
+        win.focus_force()
+        self._timeout_job = self._root.after(_TONE_MENU_TIMEOUT_MS, self._close)
+
+    def _choose(self, style) -> None:
+        cb = self._on_choose
+        self._close()
+        if cb is not None:
+            cb(style)
+
+    def _close(self) -> None:
+        job, self._timeout_job = self._timeout_job, None
+        if job is not None:
+            try:
+                self._root.after_cancel(job)
+            except Exception:
+                pass
+        win, self._win = self._win, None
+        self._on_choose = None
+        if win is not None:
+            try:
+                win.destroy()
+            except Exception:
+                pass
