@@ -801,6 +801,17 @@ class App:
         mic_changed = changes["keep_mic_open"] != old["keep_mic_open"]
         self.cfg.update(changes)
         save(self.cfg)
+        # Ollama-nåbarheten cachas (flow-beslutet på hotkey-tråden läser
+        # cachen i stället för att blocka på nätverket, se __init__). Byter
+        # man hit till Ollama-backend måste cachen räknas om NU — annars läser
+        # den första flow-dikteringen den gamla flaggan (typiskt False sedan
+        # appstart med builtin-backend) och körs som vanlig liveinskrivning
+        # trots att Ollama svarar; först nästa diktering hann annars uppdatera
+        # cachen. Sker i bakgrunden (2 s HTTP-timeout) så Spara aldrig blockeras.
+        if self.cfg["polish_backend"] == "ollama":
+            threading.Thread(
+                target=self._refresh_ollama_reachable, daemon=True
+            ).start()
         self.sounds.enabled = bool(changes["sounds"])
         for t in self.transcribers.values():
             t.initial_prompt = changes["initial_prompt"]
