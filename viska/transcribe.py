@@ -7,6 +7,7 @@ Hugging Face-repo-id — KBLab publicerar CTranslate2-formatet i repona.
 
 import logging
 import os
+import sys
 import sysconfig
 from pathlib import Path
 
@@ -29,8 +30,16 @@ def _add_nvidia_dll_dirs() -> None:
     och på PATH — ctranslate2 laddar biblioteken med LoadLibrary och
     behöver PATH-varianten på vissa system.
     """
-    for sp in {sysconfig.get_path("purelib"), sysconfig.get_path("platlib")}:
-        nvidia = Path(sp) / "nvidia"
+    if getattr(sys, "frozen", False):
+        # PyInstaller-bygge: GPU-varianten lägger DLL:erna bredvid exe:n.
+        exe_dir = Path(sys.executable).parent
+        roots = [exe_dir / "_internal" / "nvidia", exe_dir / "nvidia"]
+    else:
+        roots = [
+            Path(sp) / "nvidia"
+            for sp in {sysconfig.get_path("purelib"), sysconfig.get_path("platlib")}
+        ]
+    for nvidia in roots:
         if not nvidia.is_dir():
             continue
         for bin_dir in nvidia.glob("*/bin"):
@@ -49,6 +58,8 @@ class Transcriber:
         self.model_name = None
         self.device = None
         self.beam_size = None
+        # Ordlista/kontext (Whispers initial_prompt); kan bytas när som helst.
+        self.initial_prompt = ""
         self._requested = (model, device, beam_size, compute_type)
         self._model = self._load()
 
@@ -93,6 +104,7 @@ class Transcriber:
             audio,
             language=language,
             beam_size=self.beam_size,
+            initial_prompt=self.initial_prompt or None,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 400, "speech_pad_ms": 400},
             condition_on_previous_text=False,
@@ -107,6 +119,7 @@ class Transcriber:
             audio,
             language=language,
             beam_size=self.beam_size,
+            initial_prompt=self.initial_prompt or None,
             # Silero-VAD klipper tystnad i kanterna; utan den hallucinerar
             # Whisper undertextfraser ("Undertexter från Amara.org") på
             # svenska tystnadsklipp. Explicita värden — defaults har ändrats

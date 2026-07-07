@@ -25,6 +25,9 @@ DEFAULTS = {
     "model_en": "large-v3-turbo",
     # Aktivt språk: "sv" eller "en". Kan växlas i traymenyn.
     "language": "sv",
+    # Ordlista/kontext: namn och facktermer som modellen ska stava rätt
+    # (Whispers initial_prompt). Ställs enklast in via Inställningar.
+    "initial_prompt": "",
     # "auto" provar GPU först och faller tillbaka på CPU. Även "cuda"/"cpu".
     "device": "auto",
     # null = float16 på GPU, int8 på CPU. "int8_float16" halverar VRAM på

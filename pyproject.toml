@@ -22,6 +22,9 @@ gpu = [
 [project.scripts]
 viska = "viska.app:main"
 
+[dependency-groups]
+dev = ["pyinstaller>=6.10"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

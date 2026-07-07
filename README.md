@@ -47,9 +47,14 @@ Texten klistras in där markören är: i mejl, chattar, Word, webbläsare,
 kodredigerare. En remsa nertill på skärmen visar läget (spelar in /
 transkriberar) och korta pip markerar start och stopp.
 
-**Traymenyn** (högerklick på ikonen): växla svenska/engelska, kopiera
-senaste dikteringen igen (om den hamnade fel), byta till ny
-standardmikrofon, öppna inställningar/logg, avsluta.
+**Traymenyn** (högerklick på ikonen): Inställningar (fönster med språk,
+modell, tangent, liveläge, ljud och ordlista), växla svenska/engelska,
+kopiera senaste dikteringen igen (om den hamnade fel), byta till ny
+standardmikrofon, öppna config/logg, avsluta.
+
+**Ordlista/kontext:** skriv in namn och facktermer i Inställningar
+(t.ex. "Avanza, Smask") så stavar modellen dem rätt — motsvarigheten
+till Wispr Flows ordlista, via Whispers initial prompt.
 
 ### Liveläge
 
@@ -126,6 +131,22 @@ dikteringen körs mot den tills du växlar tillbaka.
   (RegisterHotKey). Byt `hotkey` i config.
 - **Fel mikrofon efter dockning/headsetbyte**: traymenyn → "Byt till ny
   standardmikrofon".
+
+## Bygga fristående .exe
+
+För att köra Viska på en dator utan Python/uv (t.ex. jobbdatorn):
+
+```
+uv pip install pyinstaller
+uv run python build.py          # CPU-variant (~100 MB zip) – funkar överallt
+uv run python build.py --gpu    # tar även med CUDA-biblioteken (~+1,2 GB)
+```
+
+Resultatet är `dist/Viska/Viska.exe` plus en zip. Kopiera över zippen,
+packa upp var som helst och kör `Viska.exe` — ingen installation, inga
+adminrättigheter. Modellen laddas ner första gången (CPU-varianten
+använder kb-whisper-small, ~0,5 GB). Autostart på den datorn:
+`Viska.exe --install-autostart`.
 
 ## Verktyg för test
 

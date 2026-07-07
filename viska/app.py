@@ -3,6 +3,7 @@
 import argparse
 import logging
 import os
+import queue
 import sys
 import threading
 import tkinter as tk
@@ -16,6 +17,7 @@ from viska.config import CONFIG_DIR, CONFIG_PATH, LOG_PATH, load, save
 from viska.hotkey import HotkeyError, PushToTalk
 from viska.inject import copy_to_clipboard, inject
 from viska.overlay import BLUE, GRAY, GREEN, RED, Overlay
+from viska.settings import SettingsWindow
 from viska.sounds import Sounds
 from viska.stream import LiveWorker
 from viska.transcribe import Transcriber
@@ -46,8 +48,12 @@ class App:
         # och maxtidstimern) och fryser vilket språk sessionen hade.
         self._session_lock = threading.Lock()
         self._session_language = self.language
+        self._session_transcriber: Transcriber | None = None
         self._live: LiveWorker | None = None
         self._live_texts: list[str] = []  # fraser som redan skrivits in
+        # Tkinter är huvudtrådsbundet; trayn lägger UI-jobb här i stället.
+        self._ui_queue: queue.Queue = queue.Queue()
+        self._settings: SettingsWindow | None = None
         self.hotkey = PushToTalk(
             cfg["hotkey"], cfg["hold_threshold_s"], self._on_start, self._on_stop
         )
@@ -58,8 +64,8 @@ class App:
 
     # -- Modell ------------------------------------------------------------------
 
-    def _load_model(self, lang: str) -> None:
-        if lang in self.transcribers:
+    def _load_model(self, lang: str, force: bool = False) -> None:
+        if not force and lang in self.transcribers:
             return
         namn = LANG_NAMES[lang]
         self.status = f"laddar {namn} modell…"
@@ -74,7 +80,15 @@ class App:
                 self.cfg["beam_size"],
                 self.cfg["compute_type"],
             )
-            self.transcribers[lang] = t
+            t.initial_prompt = self.cfg["initial_prompt"]
+            with self._session_lock:
+                if force:
+                    # Modellbyte: släpp även andra språkets modell så den
+                    # laddas om lat med de nya inställningarna. Pågående
+                    # _finish behåller sin egen referens.
+                    self.transcribers = {lang: t}
+                else:
+                    self.transcribers[lang] = t
             self.status = f"redo – {t.model_name} ({t.device})"
             self.overlay.show(
                 f"Viska redo ({t.device.upper()}) – tryck "
@@ -105,7 +119,10 @@ class App:
         """Returnerar True om en inspelning startade (PushToTalk-kontraktet)."""
         with self._session_lock:
             lang = self.language
-            if self.transcribers.get(lang) is None:
+            # En referens som hela sessionen använder — dicten kan bytas ut
+            # av ett modellbyte i Inställningar medan vi kör.
+            transcriber = self.transcribers.get(lang)
+            if transcriber is None:
                 self.overlay.show(
                     "Viska: modellen laddas fortfarande…", GRAY, auto_hide_ms=1500
                 )
@@ -127,20 +144,23 @@ class App:
                 )
                 return False
             self._session_language = lang
+            self._session_transcriber = transcriber
             self.sounds.start()
             self.overlay.show(
                 f"● Spelar in – släpp eller tryck {self.cfg['hotkey'].upper()} igen",
                 RED,
             )
+            if self._watchdog is not None:  # ska inte hända, men läck aldrig
+                self._watchdog.cancel()
             self._watchdog = threading.Timer(
                 self.cfg["max_recording_s"], self._on_max_time
             )
             self._watchdog.daemon = True
             self._watchdog.start()
             self._live_texts = []
-            if self._live_enabled(lang):
+            if self._live_enabled(transcriber):
                 self._live = LiveWorker(
-                    self.transcribers[lang],
+                    transcriber,
                     self.recorder,
                     lang,
                     on_commit=self._on_live_commit,
@@ -151,10 +171,10 @@ class App:
                 self._live.start()
             return True
 
-    def _live_enabled(self, lang: str) -> bool:
+    def _live_enabled(self, transcriber: Transcriber) -> bool:
         live = self.cfg["live"]
         if live == "auto":
-            return self.transcribers[lang].device == "cuda"
+            return transcriber.device == "cuda"
         return bool(live)
 
     def _on_live_commit(self, text: str) -> None:
@@ -200,14 +220,21 @@ class App:
             self._transcribing.set()
             self.overlay.show("… Transkriberar", BLUE)
             lang = self._session_language
+            transcriber = self._session_transcriber
         threading.Thread(
             target=self._finish,
-            args=(audio, lang, live_texts),
+            args=(audio, lang, transcriber, live_texts),
             daemon=True,
             name="viska-transcribe",
         ).start()
 
-    def _finish(self, audio: np.ndarray, lang: str, live_texts: list[str]) -> None:
+    def _finish(
+        self,
+        audio: np.ndarray,
+        lang: str,
+        transcriber: Transcriber,
+        live_texts: list[str],
+    ) -> None:
         try:
             if live_texts:
                 # Sätts innan sluttranskriberingen: kastar den ett fel ska
@@ -217,7 +244,6 @@ class App:
             text = ""
             too_short = len(audio) < 0.3 * SAMPLE_RATE
             silent = audio.size == 0 or float(np.abs(audio).max()) < 0.003
-            transcriber = self.transcribers.get(lang)
             if not (too_short or silent) and transcriber is not None:
                 text = transcriber.transcribe(audio, lang)
             if live_texts or text:
@@ -243,6 +269,68 @@ class App:
         finally:
             self._transcribing.clear()
 
+    # -- Inställningar ---------------------------------------------------------------
+
+    def request_settings(self) -> None:
+        """Trådsäker: be huvudtråden öppna inställningsfönstret."""
+        self._ui_queue.put(self._open_settings)
+
+    def _open_settings(self) -> None:
+        if self._settings is not None and self._settings.win.winfo_exists():
+            self._settings.win.lift()
+            return
+        self._settings = SettingsWindow(self.root, self.cfg, self._apply_settings)
+
+    def _apply_settings(self, changes: dict):
+        """Körs i huvudtråden (Spara-knappen). Returnerar felsträng eller None."""
+        # Pågår en diktering avslutas den snyggt först — annars blir
+        # sessionen föräldralös när tangenten byts ut (inspelningen skulle
+        # aldrig gå att stoppa) och det som sagts hittills ginge förlorat.
+        if self.hotkey.force_stop():
+            self._on_stop()
+        old = self.cfg
+        if changes["hotkey"] != old["hotkey"]:
+            try:
+                new_hotkey = None
+                self.hotkey.stop()  # avregistrera innan samma/ny tangent tas
+                new_hotkey = PushToTalk(
+                    changes["hotkey"],
+                    old["hold_threshold_s"],
+                    self._on_start,
+                    self._on_stop,
+                )
+                self.hotkey = new_hotkey
+            except HotkeyError as e:
+                if new_hotkey is None:  # återta den gamla tangenten
+                    self.hotkey = PushToTalk(
+                        old["hotkey"],
+                        old["hold_threshold_s"],
+                        self._on_start,
+                        self._on_stop,
+                    )
+                return str(e)
+        model_changed = (
+            changes["model"] != old["model"] or changes["model_en"] != old["model_en"]
+        )
+        self.cfg.update(changes)
+        save(self.cfg)
+        self.sounds.enabled = bool(changes["sounds"])
+        for t in self.transcribers.values():
+            t.initial_prompt = changes["initial_prompt"]
+        self.language = changes["language"]
+        if model_changed:
+            # Byts inte synkront: pågående sessioner behåller sin referens,
+            # nya modellen svajpas in under sessionslåset när den är klar.
+            threading.Thread(
+                target=self._load_model, args=(self.language, True), daemon=True
+            ).start()
+        elif self.language not in self.transcribers:
+            threading.Thread(
+                target=self._load_model, args=(self.language,), daemon=True
+            ).start()
+        log.info("Inställningar sparade")
+        return None
+
     # -- Livscykel -----------------------------------------------------------------
 
     def quit(self) -> None:
@@ -254,8 +342,19 @@ class App:
     def _poll_quit(self) -> None:
         if self._quit.is_set():
             self.root.destroy()
-        else:
-            self.root.after(200, self._poll_quit)
+            return
+        while True:
+            try:
+                job = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                job()
+            except Exception:
+                # Ett trasigt UI-jobb får aldrig döda after-kedjan — då
+                # slutar både Inställningar och Avsluta att fungera.
+                log.exception("Fel i UI-jobb")
+        self.root.after(200, self._poll_quit)
 
 
 # -- Tray ----------------------------------------------------------------------------
@@ -301,9 +400,12 @@ def make_tray(app: App):
             "Kopiera senaste diktering",
             lambda icon, item: copy_to_clipboard(app.last_text),
         ),
+        pystray.MenuItem(
+            "Inställningar…", lambda icon, item: app.request_settings()
+        ),
         pystray.MenuItem("Byt till ny standardmikrofon", restart_audio),
         pystray.MenuItem(
-            "Öppna inställningar", lambda icon, item: os.startfile(CONFIG_PATH)
+            "Öppna config-filen", lambda icon, item: os.startfile(CONFIG_PATH)
         ),
         pystray.MenuItem("Öppna logg", lambda icon, item: os.startfile(LOG_PATH)),
         pystray.Menu.SEPARATOR,
@@ -328,13 +430,20 @@ def _startup_lnk() -> Path:
 def install_autostart() -> None:
     import win32com.client
 
-    pythonw = Path(sys.executable).with_name("pythonw.exe")
-    exe = pythonw if pythonw.exists() else Path(sys.executable)
+    if getattr(sys, "frozen", False):  # PyInstaller-exe
+        target = Path(sys.executable)
+        args = ""
+        workdir = target.parent
+    else:
+        pythonw = Path(sys.executable).with_name("pythonw.exe")
+        target = pythonw if pythonw.exists() else Path(sys.executable)
+        args = "-m viska"
+        workdir = Path(__file__).resolve().parents[1]
     shell = win32com.client.Dispatch("WScript.Shell")
     lnk = shell.CreateShortCut(str(_startup_lnk()))
-    lnk.TargetPath = str(exe)
-    lnk.Arguments = "-m viska"
-    lnk.WorkingDirectory = str(Path(__file__).resolve().parents[1])
+    lnk.TargetPath = str(target)
+    lnk.Arguments = args
+    lnk.WorkingDirectory = str(workdir)
     lnk.Description = "Viska – lokal diktering"
     lnk.Save()
     print(f"Autostart installerad: {_startup_lnk()}")

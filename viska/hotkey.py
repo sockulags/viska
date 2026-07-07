@@ -189,3 +189,6 @@ class PushToTalk:
     def stop(self) -> None:
         if self._tid:
             user32.PostThreadMessageW(self._tid, WM_QUIT, 0, 0)
+            # Vänta in avregistreringen — annars kan en ny PushToTalk med
+            # samma tangent få "upptagen" av vår egen gamla registrering.
+            self._thread.join(timeout=2)
