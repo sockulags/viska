@@ -48,6 +48,20 @@ _MODIFIER_KEYSYMS = {
 }
 
 
+def _themed_text(parent, **kwargs) -> tk.Text:
+    """tk.Text följer inte ttk-temat — hämta fältfärgerna från stilen så
+    att ordlistorna inte lyser vita i mörkt läge."""
+    style = ttk.Style(parent)
+    bg = style.lookup("TEntry", "fieldbackground") or "white"
+    fg = style.lookup("TEntry", "foreground") or "black"
+    return tk.Text(
+        parent, bg=bg, fg=fg, insertbackground=fg,
+        relief="flat", highlightthickness=1,
+        highlightbackground=style.lookup("TEntry", "bordercolor") or "#888888",
+        **kwargs,
+    )
+
+
 def _row(parent, label: str, hint: str | None = None):
     frame = ttk.Frame(parent)
     frame.pack(fill="x", pady=6)
@@ -136,7 +150,7 @@ class SettingsWindow:
         )
         ttk.Combobox(
             holder, textvariable=self._live, values=list(_LIVE_CHOICES),
-            state="readonly", width=16,
+            state="readonly", width=20,
         ).pack()
 
         holder = _row(general, "Kvalitet (svenska)")
@@ -181,7 +195,7 @@ class SettingsWindow:
             text="Namn och facktermer som ska stavas rätt, t.ex. \"Avanza, Smask\".",
             foreground="#888888", font=("Segoe UI", 8),
         ).pack(anchor="w")
-        self._prompt = tk.Text(wordlist, width=52, height=3, wrap="word")
+        self._prompt = _themed_text(wordlist, width=52, height=3, wrap="word")
         self._prompt.pack(fill="x", pady=(4, 10))
         self._prompt.insert("1.0", cfg["initial_prompt"])
 
@@ -216,7 +230,7 @@ class SettingsWindow:
         )
         self._profile_app_box.pack()
         holder = _row(editor, "Ordlista för appen")
-        self._profile_prompt = tk.Text(holder, width=34, height=2, wrap="word")
+        self._profile_prompt = _themed_text(holder, width=34, height=2, wrap="word")
         self._profile_prompt.pack()
         holder = _row(editor, "Inskrivning")
         reverse_inject = {v: k for k, v in _INJECT_CHOICES.items()}
