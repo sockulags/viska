@@ -15,7 +15,12 @@ import numpy as np
 from viska import __version__, autostart, commands, gpu, llm, update
 from viska.audio import SAMPLE_RATE, Recorder
 from viska.config import CONFIG_DIR, CONFIG_PATH, LOG_PATH, load, save
-from viska.focus import foreground_app, foreground_is_terminal
+from viska.focus import (
+    focus_window,
+    foreground_app,
+    foreground_is_terminal,
+    foreground_window,
+)
 from viska.hotkey import ActionKey, HotkeyError, PushToTalk
 from viska.inject import (
     copy_to_clipboard,
@@ -69,6 +74,10 @@ class App:
         # diktering inte kan byta beteende halvvägs.
         self._session_flow = False
         self._session_polish_prompt = cfg["polish_prompt"]
+        # Fönstret dikteringen gäller, fryst vid start. Flow-läget skriver
+        # tillbaka den polerade texten hit så resultatet hamnar rätt även om
+        # fokus hunnit flytta under poleringen.
+        self._session_target_hwnd: int | None = None
         # En modelladdning per språk i taget — utan spärren skulle varje
         # tangenttryck i en profilerad app starta ännu en 3 GB-laddning.
         self._loading_langs: set[str] = set()
@@ -92,12 +101,15 @@ class App:
         # instansiera Polisher samtidigt.
         self._polisher_lock = threading.Lock()
         self._polishing = threading.Event()
-        # Serialiserar flow-lägets polering+inskrivning mot övrig inskrivning:
-        # bevarar ordningen och skyddar klippbordet när en flow-session ännu
-        # inte hunnit skriva in medan nästa diktering redan är klar. Tas alltid
-        # INNAN _transcribing släpps (se _run_flow) så det aldrig kan finnas
-        # mer än en väntande session. Ledigt när flow inte används.
-        self._flow_lock = threading.Lock()
+        # Ollama-nåbarhet cachas: flow-beslutet vid start (live eller inte)
+        # behöver veta om poleringen är tillgänglig, men ett synkront HTTP-
+        # anrop på hotkey-tråden skulle fördröja "Spelar in" upp till 2 s när
+        # Ollama är nere. Cachen läses där och uppdateras i bakgrunden.
+        self._ollama_reachable = False
+        if cfg["polish_backend"] == "ollama":
+            threading.Thread(
+                target=self._refresh_ollama_reachable, daemon=True
+            ).start()
         self.polish_key: ActionKey | None = None
         try:
             self.polish_key = ActionKey(cfg["polish_hotkey"], self._on_polish_key)
@@ -237,6 +249,9 @@ class App:
                 return False
             self._session_language = lang
             self._session_transcriber = transcriber
+            # Fånga mål-HWND nu — dikteringstangenten är en global hotkey som
+            # OS:et konsumerar, så förgrundsfönstret här är appen texten gäller.
+            self._session_target_hwnd = foreground_window()
             # Global ordlista + appens egen, kombinerat.
             self._session_prompt = (
                 ", ".join(
@@ -258,12 +273,17 @@ class App:
             # (ej nedladdad, backend nere) körs sessionen som VANLIG diktering
             # med liveinskrivning i stället — annars skulle en kvarglömd flow-
             # flagga (t.ex. efter "Ta bort poleringen") tyst stänga av live och
-            # falla tillbaka på råtext varje gång. installed() anropas bara när
-            # flaggan faktiskt är på (kortsluter), så vanlig diktering utan flow
-            # betalar inget för kontrollen.
-            self._session_flow = bool(
-                profile.get("flow", self.cfg["flow"])
-            ) and llm.installed(self.cfg)
+            # falla tillbaka på råtext varje gång. Tillgänglighetskollen är
+            # icke-blockerande (Ollama läses ur cachen) så hotkey-tråden aldrig
+            # hänger på nätverket; vanlig diktering utan flow kortsluter och
+            # betalar inget.
+            flow_flag = bool(profile.get("flow", self.cfg["flow"]))
+            if flow_flag and self.cfg["polish_backend"] == "ollama":
+                # Håll cachen färsk till nästa diktering utan att blockera nu.
+                threading.Thread(
+                    target=self._refresh_ollama_reachable, daemon=True
+                ).start()
+            self._session_flow = flow_flag and self._flow_polish_available()
             self._session_polish_prompt = (
                 profile.get("polish_prompt") or self.cfg["polish_prompt"]
             )
@@ -364,11 +384,12 @@ class App:
             inject_mode = self._session_inject
             flow = self._session_flow
             polish_prompt = self._session_polish_prompt
+            target_hwnd = self._session_target_hwnd
         threading.Thread(
             target=self._finish,
             args=(
                 audio, lang, transcriber, live_texts, prompt, inject_mode,
-                flow, polish_prompt,
+                flow, polish_prompt, target_hwnd,
             ),
             daemon=True,
             name="viska-transcribe",
@@ -384,6 +405,7 @@ class App:
         inject_mode: str,
         flow: bool = False,
         polish_prompt: str = "",
+        target_hwnd: int | None = None,
     ) -> None:
         try:
             if live_texts:
@@ -400,11 +422,12 @@ class App:
             if flow and text:
                 # Flow-läge: polera hela transkriptet innan inskrivning.
                 # live_texts är alltid tomt här (preview_only committar aldrig).
-                # _run_flow släpper _transcribing så snart flow-låset tagits, så
-                # poleringen (upp till FLOW_POLISH_TIMEOUT_S) aldrig blockerar
-                # nästa inspelning — till skillnad från om _finish_flow körts
-                # synkront här med _transcribing kvar satt hela vägen till inject.
-                self._run_flow(text, inject_mode, polish_prompt)
+                # _transcribing hålls kvar genom polering + inskrivning (som en
+                # längre vanlig diktering): nästa inspelning kan inte starta och
+                # skriva in före den polerade texten, och fönstret dikteringen
+                # gällde behåller fokus. Poleringen har en hård tidsgräns
+                # (FLOW_POLISH_TIMEOUT_S) så väntan aldrig blir oändlig.
+                self._finish_flow(text, inject_mode, polish_prompt, target_hwnd)
                 return
             if live_texts or text:
                 self.last_text = " ".join([*live_texts, text]).strip()
@@ -420,12 +443,7 @@ class App:
                 return
             if self.cfg["append_space"] and not text.endswith("\n"):
                 text += " "
-            # Flow-låset serialiserar inskrivningen mot en ev. pågående flow-
-            # polering: ordningen bevaras och klippbordet krockar inte om en
-            # föregående flow-session ännu inte hunnit skriva in. Utan flow är
-            # låset alltid ledigt och beteendet är oförändrat.
-            with self._flow_lock:
-                inject(text, inject_mode, self.cfg["restore_clipboard"])
+            inject(text, inject_mode, self.cfg["restore_clipboard"])
             self.overlay.hide()
         except Exception:
             log.exception("Transkriberingen misslyckades")
@@ -438,21 +456,15 @@ class App:
 
     # -- Flow-läge (automatisk polering före inskrivning) ---------------------------
 
-    def _run_flow(self, raw: str, inject_mode: str, polish_prompt: str) -> None:
-        """Kör flow-poleringen serialiserat men utan att blockera nästa
-        diktering. Tar först flow-låset (bevarar ordningen mot en föregående
-        flow-session som ännu inte skrivit in) och släpper därefter
-        _transcribing — då kan en ny inspelning starta medan poleringen pågår
-        i bakgrunden. Att låset tas INNAN _transcribing släpps gör att en
-        väntande session behåller _transcribing och därmed spärrar alla andra:
-        det finns aldrig mer än en väntare på låset, så inskrivningarna sker i
-        tur och ordning."""
-        with self._flow_lock:
-            self._transcribing.clear()
-            self._finish_flow(raw, inject_mode, polish_prompt)
-
-    def _finish_flow(self, raw: str, inject_mode: str, polish_prompt: str) -> None:
+    def _finish_flow(
+        self, raw: str, inject_mode: str, polish_prompt: str, target_hwnd: int | None
+    ) -> None:
         """Polerar hela dikteringen och skriver in resultatet på en gång.
+        Körs synkront på transkriberingstråden med _transcribing kvar satt:
+        nästa inspelning kan inte starta förrän texten skrivits in, så den
+        polerade texten kan aldrig hamna efter en senare diktering och
+        fönstret dikteringen gällde har normalt kvar fokus.
+
         Både råtexten (först) och den polerade texten (överst) hamnar i
         historiken. Är poleringen otillgänglig, kastar fel eller tar för
         lång tid skrivs råtexten in precis som en vanlig diktering –
@@ -472,6 +484,11 @@ class App:
             out = raw
         if self.cfg["append_space"] and not out.endswith("\n"):
             out += " "
+        # Poleringen kan ha tagit tid; se till att texten skrivs in i det
+        # fönster dikteringen gällde även om fokus hunnit flytta. I normalfallet
+        # (fokus kvar) är det en no-op och ingen fokusstöld sker.
+        if target_hwnd:
+            focus_window(target_hwnd)
         inject(out, inject_mode, self.cfg["restore_clipboard"])
         self.overlay.hide()
 
@@ -529,6 +546,22 @@ class App:
         threading.Thread(
             target=work, daemon=True, name="viska-flow-warmup"
         ).start()
+
+    def _flow_polish_available(self) -> bool:
+        """Icke-blockerande koll vid start om poleringen kan användas för flow
+        (annars körs sessionen som vanlig diktering med liveinskrivning). För
+        Ollama läses den bakgrundsuppdaterade cachen — ett synkront HTTP-anrop
+        på hotkey-tråden skulle fördröja "Spelar in". builtin är en billig
+        filkoll."""
+        if self.cfg["polish_backend"] == "ollama":
+            return self._ollama_reachable
+        return llm.installed(self.cfg)
+
+    def _refresh_ollama_reachable(self) -> None:
+        try:
+            self._ollama_reachable = llm.ollama_reachable(self.cfg)
+        except Exception:
+            self._ollama_reachable = False
 
     # -- Inställningar ---------------------------------------------------------------
 

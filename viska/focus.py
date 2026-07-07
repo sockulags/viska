@@ -75,3 +75,55 @@ def foreground_app() -> str | None:
     except Exception:
         # Upphöjda fönster m.m. kan neka insyn — profilen hoppar då bara över.
         return None
+
+
+def foreground_window() -> int | None:
+    """HWND för fokuserat fönster (eller None). Fryses vid inspelningsstart
+    så flow-läget kan skriva tillbaka den polerade texten i rätt fönster
+    även om användaren hunnit byta fokus medan poleringen pågick."""
+    try:
+        return win32gui.GetForegroundWindow() or None
+    except Exception:
+        return None
+
+
+def focus_window(hwnd: int) -> bool:
+    """Ser till att hwnd ligger i förgrunden inför en inskrivning. Har fokus
+    inte flyttat (det vanliga i flow-läget, där dikteringen hålls kvar tills
+    texten skrivits in) är det en no-op och ingen fokusstöld sker.
+
+    SetForegroundWindow nekas normalt en bakgrundsapp; standardknepet är att
+    tillfälligt koppla ihop inmatningskön med förgrundstråden så att bytet
+    tillåts. Bäst ansträngning: misslyckas det skrivs texten ändå in i det
+    fönster som råkar ha fokus (råversionen finns kvar i historiken)."""
+    try:
+        if win32gui.GetForegroundWindow() == hwnd:
+            return True  # fokus kvar (det vanliga) — ingen fokusstöld
+        if not win32gui.IsWindow(hwnd):
+            return False  # fönstret stängt under poleringen
+        cur_tid = win32api.GetCurrentThreadId()
+        fg = win32gui.GetForegroundWindow()
+        fg_tid = win32process.GetWindowThreadProcessId(fg)[0] if fg else 0
+        attached = bool(fg_tid) and fg_tid != cur_tid
+        if attached:
+            try:
+                win32process.AttachThreadInput(cur_tid, fg_tid, True)
+            except Exception:
+                attached = False
+        try:
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception:
+            pass  # nekat trots knepet — inskrivningen faller tillbaka på fokus
+        finally:
+            if attached:
+                try:
+                    win32process.AttachThreadInput(cur_tid, fg_tid, False)
+                except Exception:
+                    pass
+        ok = win32gui.GetForegroundWindow() == hwnd
+        if not ok:
+            log.warning("Kunde inte återställa fokus till målfönstret före inskrivning")
+        return ok
+    except Exception:
+        log.exception("Fel vid fokusåterställning")
+        return False
