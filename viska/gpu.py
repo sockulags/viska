@@ -7,7 +7,6 @@ utan pip, ombyggnad eller adminrättigheter. Enda nätverkstrafiken är
 biblioteksnedladdningen; ingen användardata skickas någonstans.
 """
 
-import ctypes.util
 import json
 import logging
 import os
@@ -25,6 +24,10 @@ from viska.config import CONFIG_DIR
 log = logging.getLogger(__name__)
 
 GPU_LIB_DIR = CONFIG_DIR / "nvidia"
+# PATH som den såg ut innan appen laddat några modeller —
+# transcribe._add_nvidia_dll_dirs lägger våra egna nedladdade kataloger
+# på processens PATH, och de får inte misstas för systemets CUDA.
+_ORIGINAL_PATH = os.environ.get("PATH", "")
 # CUDA-DLL:er som är inladdade i processen är låsta och kan inte raderas
 # förrän appen startats om — markören skjuter upp borttagningen dit.
 _REMOVE_MARKER = CONFIG_DIR / "nvidia.remove"
@@ -126,19 +129,28 @@ def system_cuda_dirs() -> list[Path]:
 
 
 def system_cuda_available() -> bool:
-    """Har datorn redan en fungerande CUDA-runtime (toolkit + cuDNN)?
+    """Har datorn redan en komplett CUDA-runtime (toolkit + cuDNN)?
 
-    ctranslate2 behöver BÅDE cuBLAS 12 och cuDNN 9 — ett CUDA Toolkit utan
-    separat installerad cuDNN räcker inte, och då fyller vår nedladdning
-    luckan i stället.
+    Kollar allt Viska behöver: cuBLAS 12 + cuDNN 9 (ctranslate2) samt
+    cudart 12 + nvRTC (llama.cpp:s CUDA-bygge, poleringen). Saknas något
+    fyller vår nedladdning luckan i stället. Söker bara i PATH som den
+    såg ut vid appstart plus CUDA_PATH — processens PATH innehåller även
+    våra egna nedladdade kataloger, som inte får misstas för systemets.
     """
+    gpu_root = str(GPU_LIB_DIR).lower()
+    search_dirs = list(system_cuda_dirs()) + [
+        Path(entry)
+        for entry in _ORIGINAL_PATH.split(os.pathsep)
+        if entry and not entry.lower().startswith(gpu_root)
+    ]
 
     def found(name: str) -> bool:
-        if ctypes.util.find_library(name):  # söker processens PATH
-            return True
-        return any((d / f"{name}.dll").exists() for d in system_cuda_dirs())
+        return any((d / f"{name}.dll").is_file() for d in search_dirs)
 
-    return found("cublas64_12") and found("cudnn64_9")
+    return all(
+        found(name)
+        for name in ("cublas64_12", "cudnn64_9", "nvrtc64_120_0", "cudart64_12")
+    )
 
 
 def gpu_support_present() -> bool:
