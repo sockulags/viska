@@ -47,8 +47,9 @@ DEFAULTS = {
     "live": "auto",
     # Hur ofta ljudet omtranskriberas, och hur lång paus som gör en fras
     # färdig (färdig text skrivs in och kan inte ändras i efterhand).
-    "live_interval_s": 0.7,
-    "live_commit_silence_s": 0.6,
+    # Lägre = snabbare inskrivning men committar hellre vid korta pauser.
+    "live_interval_s": 0.4,
+    "live_commit_silence_s": 0.45,
     # null = systemets standardmikrofon. Annars namn eller index från
     # `viska --list-devices`.
     "input_device": None,

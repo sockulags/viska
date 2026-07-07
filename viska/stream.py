@@ -29,8 +29,8 @@ class LiveWorker:
         language: str,
         on_commit,
         on_partial,
-        interval_s: float = 0.7,
-        commit_silence_s: float = 0.6,
+        interval_s: float = 0.4,
+        commit_silence_s: float = 0.45,
         max_window_s: float = 18.0,
     ):
         self.transcriber = transcriber

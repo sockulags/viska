@@ -118,7 +118,11 @@ class Transcriber:
             beam_size=self.beam_size,
             initial_prompt=self.initial_prompt or None,
             vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 400, "speech_pad_ms": 400},
+            # Kortare padding än batchläget: segmentslutet hamnar närmare
+            # verkligt talslut, så tystnadsfönstret som krävs för commit
+            # blir tillgängligt tidigare. Klippet skyddas ändå — commit
+            # sker bara i RMS-verifierad tystnad.
+            vad_parameters={"min_silence_duration_ms": 300, "speech_pad_ms": 200},
             condition_on_previous_text=False,
         )
         return list(segments)
