@@ -1,0 +1,100 @@
+"""Transkribering med faster-whisper (CTranslate2). Allt körs lokalt.
+
+Modellerna är KBLab:s KB-Whisper för svenska (tränade på 50 000+ timmar
+svenskt tal, ~47 % lägre WER än whisper-large-v3) och laddas direkt via
+Hugging Face-repo-id — KBLab publicerar CTranslate2-formatet i repona.
+"""
+
+import logging
+import os
+import sysconfig
+from pathlib import Path
+
+import numpy as np
+
+log = logging.getLogger(__name__)
+
+# Vid "auto": bästa svenska modellen som är rimlig per enhet.
+AUTO_MODELS = {
+    "cuda": "KBLab/kb-whisper-large",
+    "cpu": "KBLab/kb-whisper-small",
+}
+
+
+def _add_nvidia_dll_dirs() -> None:
+    """Gör pip-installerade CUDA-bibliotek (cuBLAS/cuDNN) hittbara för ctranslate2.
+
+    sysconfig i stället för site.getsitepackages(): den senare pekar på
+    bas-interpretern i uv-venv:er. Katalogerna läggs både i DLL-sökvägen
+    och på PATH — ctranslate2 laddar biblioteken med LoadLibrary och
+    behöver PATH-varianten på vissa system.
+    """
+    for sp in {sysconfig.get_path("purelib"), sysconfig.get_path("platlib")}:
+        nvidia = Path(sp) / "nvidia"
+        if not nvidia.is_dir():
+            continue
+        for bin_dir in nvidia.glob("*/bin"):
+            os.add_dll_directory(str(bin_dir))
+            os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
+
+
+class Transcriber:
+    def __init__(self, model: str = "auto", device: str = "auto", beam_size=None):
+        self.model_name = None
+        self.device = None
+        self.beam_size = None
+        self._requested = (model, device, beam_size)
+        self._model = self._load()
+
+    def _load(self):
+        from faster_whisper import WhisperModel
+
+        model, device, beam_size = self._requested
+        devices = ["cuda", "cpu"] if device == "auto" else [device]
+        last_error = None
+        for dev in devices:
+            name = AUTO_MODELS[dev] if model == "auto" else model
+            compute = "float16" if dev == "cuda" else "int8"
+            try:
+                if dev == "cuda":
+                    _add_nvidia_dll_dirs()
+                loaded = WhisperModel(name, device=dev, compute_type=compute)
+                self._warmup(loaded)
+                self.model_name = name
+                self.device = dev
+                self.beam_size = beam_size or (5 if dev == "cuda" else 2)
+                log.info("Modell %s laddad på %s (%s)", name, dev, compute)
+                return loaded
+            except Exception as e:
+                last_error = e
+                log.warning("Kunde inte ladda %s på %s: %s", name, dev, e)
+        raise last_error
+
+    @staticmethod
+    def _warmup(model) -> None:
+        # En halv sekund tystnad: CUDA/cuDNN-fel visar sig här i stället för
+        # vid första dikteringen, och kernels värms så första svaret går fort.
+        silence = np.zeros(8000, dtype=np.float32)
+        segments, _ = model.transcribe(silence, beam_size=1)
+        list(segments)
+
+    def transcribe(self, audio, language: str | None = "sv") -> str:
+        """`audio` är en float32-array i 16 kHz, eller en sökväg till en ljudfil."""
+        if language == "auto":
+            language = None
+        segments, _info = self._model.transcribe(
+            audio,
+            language=language,
+            beam_size=self.beam_size,
+            # Silero-VAD klipper tystnad i kanterna; utan den hallucinerar
+            # Whisper undertextfraser ("Undertexter från Amara.org") på
+            # svenska tystnadsklipp. Explicita värden — defaults har ändrats
+            # mellan faster-whisper-versioner.
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 500, "speech_pad_ms": 400},
+            # True ger hallucinationsloopar på korta dikteringsklipp.
+            condition_on_previous_text=False,
+            without_timestamps=True,
+        )
+        text = " ".join(seg.text.strip() for seg in segments)
+        return " ".join(text.split())
