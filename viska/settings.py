@@ -12,9 +12,8 @@ import queue
 import tkinter as tk
 from tkinter import ttk
 
-from viska import autostart, llm, ui
+from viska import autostart, focus, llm, ui
 from viska.config import CONFIG_PATH, LOG_PATH
-from viska.focus import visible_apps
 from viska.hotkey import HotkeyError, parse_hotkey
 
 # Livekänsla: (passintervall, tystnadskrav). Kortare = ivrigare inskrivning.
@@ -137,6 +136,10 @@ class SettingsWindow:
             if isinstance(v, dict)
         }
         self._selected_app: str | None = None
+        # Processnamn i listboxens ordning: listan visar visningsnamn (riktiga
+        # programnamn) men config nycklas på processnamn, så markeringens index
+        # slås upp här i stället för via listboxens text.
+        self._app_order: list[str] = []
         self._capturing = False
 
         self.win = tk.Toplevel(root)
@@ -530,16 +533,18 @@ class SettingsWindow:
     # -- Per-app-profiler ----------------------------------------------------------
 
     def _refresh_profile_list(self) -> None:
+        focus.running_apps()  # värm namncachen så listan visar programnamn
         self._app_list.delete(0, "end")
-        for app in sorted(self._profiles):
-            self._app_list.insert("end", app)
+        self._app_order = sorted(self._profiles)
+        for app in self._app_order:
+            self._app_list.insert("end", focus.display_name(app))
         self._refresh_polish_overview()
 
     def _on_profile_select(self, _event) -> None:
         selection = self._app_list.curselection()
-        if not selection:
+        if not selection or selection[0] >= len(self._app_order):
             return
-        app = self._app_list.get(selection[0])
+        app = self._app_order[selection[0]]
         self._selected_app = app
         profile = self._profiles[app]
         self._profile_app.set(app)
@@ -576,8 +581,15 @@ class SettingsWindow:
         self._profile_flow.set(bool(profile.get("flow", self._flow.get())))
 
     def _new_profile(self) -> None:
+        # Öppna väljaren för körande program (riktiga namn) + fritext. Avbryts
+        # den rörs editorn inte alls; annars fyller det valda processnamnet i
+        # en tom profileditor.
+        proc = self._choose_running_app()
+        if proc is None:
+            return
         self._selected_app = None
-        self._profile_app.set("")
+        self._app_list.selection_clear(0, "end")
+        self._profile_app.set(proc)
         self._profile_prompt.delete("1.0", "end")
         self._profile_polish.delete("1.0", "end")
         self._profile_polish_choice.set(_GLOBAL_STANDARD)
@@ -586,8 +598,83 @@ class SettingsWindow:
         self._profile_lang.set(list(_PROFILE_LANG)[0])
         # Ny profil ärver den globala standarden tills användaren avviker.
         self._profile_flow.set(bool(self._flow.get()))
-        self._profile_app_box.config(values=visible_apps())
-        self._profile_app_box.focus_set()
+        self._profile_app_box.config(values=focus.visible_apps())
+        self._profile_prompt.focus_set()
+
+    def _choose_running_app(self) -> str | None:
+        """Modal väljare för en ny app-profil: körande program med synliga
+        fönster (riktiga namn) plus ett fritextfält för manuellt processnamn.
+        Returnerar valt processnamn (gemener) eller None om väljaren avbröts.
+        Följer fönstermönstret här (ui.setup_window, temafärger) och körs i
+        huvudtråden — öppnas från Ny…-knappens command."""
+        pal = self._pal
+        apps = focus.running_apps()  # [(processnamn, visningsnamn)], värmer cachen
+        dlg = tk.Toplevel(self.win)
+        dlg.title("Välj app")
+        dlg.resizable(False, False)
+        dlg.attributes("-topmost", True)
+        ui.setup_window(dlg)
+        dlg.transient(self.win)
+        body = tk.Frame(dlg, bg=pal["window"], padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+        self._hint(
+            body,
+            "Välj ett program som körs, eller skriv processnamnet själv "
+            "(t.ex. code.exe).",
+        )
+        listbox = ui.themed_listbox(body, height=8, exportselection=False)
+        listbox.pack(fill="both", expand=True, pady=(6, 6))
+        for _proc, display in apps:
+            listbox.insert("end", display)
+
+        manual = tk.StringVar()
+        holder = self._row(body, "Processnamn")
+        ttk.Entry(holder, textvariable=manual, width=_FIELD_W).pack()
+
+        result: dict[str, str | None] = {"proc": None}
+
+        def use(proc: str) -> None:
+            result["proc"] = proc
+            dlg.destroy()
+
+        def confirm() -> None:
+            # Fritextfältet vinner: det fylls med processnamnet vid markering
+            # men kan skrivas över för hand.
+            typed = manual.get().strip().lower()
+            if typed:
+                use(typed)
+                return
+            sel = listbox.curselection()
+            if sel and sel[0] < len(apps):
+                use(apps[sel[0]][0])
+
+        def on_select(_e) -> None:
+            sel = listbox.curselection()
+            if sel and sel[0] < len(apps):
+                manual.set(apps[sel[0]][0])
+
+        listbox.bind("<<ListboxSelect>>", on_select)
+        listbox.bind("<Double-Button-1>", lambda _e: confirm())
+
+        footer = tk.Frame(body, bg=pal["window"])
+        footer.pack(fill="x", pady=(10, 0))
+        ttk.Button(footer, text="Avbryt", command=dlg.destroy).pack(side="right")
+        ttk.Button(
+            footer, text="Välj", command=confirm, style="Accent.TButton"
+        ).pack(side="right", padx=(0, 6))
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        dlg.bind("<Return>", lambda _e: confirm())
+
+        dlg.update_idletasks()
+        w = dlg.winfo_reqwidth()
+        h = dlg.winfo_reqheight()
+        px, py = self.win.winfo_rootx(), self.win.winfo_rooty()
+        pw, ph = self.win.winfo_width(), self.win.winfo_height()
+        dlg.geometry(f"+{px + (pw - w) // 2}+{py + (ph - h) // 2}")
+        dlg.grab_set()
+        listbox.focus_set()
+        self.win.wait_window(dlg)
+        return result["proc"]
 
     def _save_profile(self) -> None:
         app = self._profile_app.get().strip().lower()
@@ -632,8 +719,8 @@ class SettingsWindow:
 
     def _remove_profile(self) -> None:
         selection = self._app_list.curselection()
-        if selection:
-            self._profiles.pop(self._app_list.get(selection[0]), None)
+        if selection and selection[0] < len(self._app_order):
+            self._profiles.pop(self._app_order[selection[0]], None)
             self._refresh_profile_list()
 
     # -- Polering-fliken -----------------------------------------------------------
@@ -885,7 +972,7 @@ class SettingsWindow:
             if "flow" in prof:
                 parts.append("flow på" if prof.get("flow") else "flow av")
             if parts:
-                lines.append(f"{app} – {' · '.join(parts)}")
+                lines.append(f"{focus.display_name(app)} – {' · '.join(parts)}")
         self._polish_overview.config(
             text="\n".join(lines) if lines else "Inga appar har egen polering ännu."
         )

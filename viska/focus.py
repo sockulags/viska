@@ -13,9 +13,17 @@ import win32process
 log = logging.getLogger(__name__)
 
 
-def visible_apps() -> list[str]:
-    """Processnamn för alla synliga fönster — till profilväljaren."""
-    names: set[str] = set()
+# Cache: processnamn (gemener) → visningsnamn (programmets FileDescription,
+# eller processnamnet självt som fallback). Fylls när körande fönster räknas
+# upp (running_apps) så inga upprepade versionsinfo-diskslag sker.
+_NAME_CACHE: dict[str, str] = {}
+
+
+def _windowed_processes() -> dict[str, str]:
+    """Synliga, titelförsedda fönster mappade till {processnamn (gemener):
+    exe-sökväg}. Deduplicerat på processnamn (första fönstret vinner). Viska
+    själv utesluten. Nekad insyn (upphöjda fönster m.m.) hoppas bara över."""
+    found: dict[str, str] = {}
 
     def cb(hwnd, _):
         try:
@@ -28,7 +36,7 @@ def visible_apps() -> list[str]:
                     path = win32process.GetModuleFileNameEx(handle, 0)
                 finally:
                     win32api.CloseHandle(handle)
-                names.add(path.rsplit("\\", 1)[-1].lower())
+                found.setdefault(path.rsplit("\\", 1)[-1].lower(), path)
         except Exception:
             pass
         return True
@@ -37,8 +45,55 @@ def visible_apps() -> list[str]:
         win32gui.EnumWindows(cb, None)
     except Exception:
         pass
-    names.discard("viska.exe")
-    return sorted(names)
+    found.pop("viska.exe", None)
+    return found
+
+
+def _file_description(path: str) -> str | None:
+    """Programmets FileDescription ur exe:ns versionsinfo, eller None när den
+    saknas eller inte kan läsas. Kraschar aldrig."""
+    try:
+        lang, codepage = win32api.GetFileVersionInfo(
+            path, "\\VarFileInfo\\Translation"
+        )[0]
+        key = "\\StringFileInfo\\%04x%04x\\FileDescription" % (lang, codepage)
+        desc = (win32api.GetFileVersionInfo(path, key) or "").strip()
+        return desc or None
+    except Exception:
+        return None
+
+
+def _display_name_for_path(path: str) -> str:
+    """Visningsnamn för en exe-sökväg: FileDescription, annars filnamnet."""
+    return _file_description(path) or path.rsplit("\\", 1)[-1]
+
+
+def visible_apps() -> list[str]:
+    """Processnamn (gemener) för alla synliga fönster — manuell profilväljare."""
+    return sorted(_windowed_processes())
+
+
+def running_apps() -> list[tuple[str, str]]:
+    """(processnamn, visningsnamn) för program med synliga fönster, sorterat på
+    visningsnamn. Fyller namncachen på köpet så senare display_name-uppslag för
+    samma appar blir gratis (inga upprepade diskslag)."""
+    result = []
+    for proc, path in _windowed_processes().items():
+        name = _display_name_for_path(path)
+        _NAME_CACHE[proc] = name
+        result.append((proc, name))
+    return sorted(result, key=lambda t: t[1].lower())
+
+
+def display_name(process: str) -> str:
+    """Användarvänligt namn för ett processnamn (t.ex. "code.exe" → "Visual
+    Studio Code"), för visning där config annars visar det råa processnamnet.
+    Config förblir nycklad på processnamnet — det här är bara presentation.
+
+    Läser namncachen (fylld av running_apps); en miss faller tillbaka på
+    processnamnet. Kraschar aldrig."""
+    key = (process or "").strip().lower()
+    return _NAME_CACHE.get(key) or process
 
 
 # Fönsterklasser för konsoler: Ctrl+C utan markering blir SIGINT där och
