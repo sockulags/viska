@@ -49,15 +49,22 @@ _MODIFIER_KEYSYMS = {
 
 
 def _themed_text(parent, **kwargs) -> tk.Text:
-    """tk.Text följer inte ttk-temat — hämta fältfärgerna från stilen så
-    att ordlistorna inte lyser vita i mörkt läge."""
-    style = ttk.Style(parent)
-    bg = style.lookup("TEntry", "fieldbackground") or "white"
-    fg = style.lookup("TEntry", "foreground") or "black"
+    """tk.Text följer inte ttk-temat — och sv-ttk bygger sina fält av
+    bilder så stilslagning ger inga färger. Välj matchande palett utifrån
+    temanamnet i stället, så att ordlistorna inte lyser vita i mörkt läge."""
+    try:
+        import sv_ttk
+
+        dark = sv_ttk.get_theme() == "dark"
+    except Exception:
+        dark = False
+    bg, fg, border = (
+        ("#1c1c1c", "#fafafa", "#404040") if dark else ("#ffffff", "#1c1c1c", "#cccccc")
+    )
     return tk.Text(
         parent, bg=bg, fg=fg, insertbackground=fg,
         relief="flat", highlightthickness=1,
-        highlightbackground=style.lookup("TEntry", "bordercolor") or "#888888",
+        highlightbackground=border, highlightcolor=border,
         **kwargs,
     )
 
