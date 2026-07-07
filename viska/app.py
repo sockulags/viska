@@ -387,19 +387,19 @@ class App:
         if self._llm_busy.is_set():
             return {"state": "Åtgärd pågår…", "kind": "warn", "action": None}
         key = (self.cfg["polish_hotkey"] or "f8").upper()
-        if llm.model_installed(self.cfg):
+        if llm.installed(self.cfg):
             return {
                 "state": f"installerad – markera text och tryck {key}",
                 "kind": "ok",
                 "action": "remove",
-                "label": "Ta bort poleringsmodellen",
+                "label": "Ta bort poleringen",
                 "run": self._remove_llm_async,
             }
         return {
             "state": "ej installerad",
             "kind": "warn",
             "action": "download",
-            "label": f"Ladda ner poleringsmodell (~{llm.DOWNLOAD_SIZE_GB} GB)",
+            "label": f"Ladda ner polering (~{llm.download_size_gb(self.cfg)} GB)",
             "run": self._download_llm_async,
         }
 
@@ -411,8 +411,8 @@ class App:
 
         def work():
             try:
-                llm.download_model(self.cfg, progress=progress)
-                done(f"Poleringsmodellen installerad – markera text och tryck "
+                llm.download_all(self.cfg, progress=progress)
+                done(f"Polering installerad – markera text och tryck "
                      f"{self.cfg['polish_hotkey'].upper()}.")
             except Exception as e:
                 log.exception("Nedladdningen av poleringsmodellen misslyckades")
@@ -622,7 +622,7 @@ class App:
 
     def _do_polish(self) -> None:
         try:
-            if not llm.model_installed(self.cfg):
+            if not llm.installed(self.cfg):
                 self.overlay.show(
                     "Polering ej installerad – Inställningar → Polering",
                     GRAY,

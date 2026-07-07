@@ -6,10 +6,13 @@ samma eftermonteringsmönster som GPU-stödet. Kräver i praktiken GPU:
 4B-modellen på CPU tar tiotals sekunder per omskrivning.
 """
 
+import importlib.util
 import logging
+import os
 import shutil
 import threading
 import urllib.request
+import zipfile
 from pathlib import Path
 
 from viska.config import CONFIG_DIR
@@ -17,8 +20,18 @@ from viska.config import CONFIG_DIR
 log = logging.getLogger(__name__)
 
 LLM_DIR = CONFIG_DIR / "llm"
+LLAMA_LIB_DIR = LLM_DIR / "lib"
 _REMOVE_MARKER = CONFIG_DIR / "llm.remove"
-DOWNLOAD_SIZE_GB = 2.4
+MODEL_SIZE_GB = 2.4
+RUNTIME_SIZE_GB = 0.5
+# llama.cpp-motorn (CUDA-bygge, py3-none = versionsoberoende ren Python +
+# DLL:er). Bundlas INTE i exe:n — ggml-cuda.dll ensam är 900 MB — utan
+# eftermonteras hit tillsammans med modellen. Samma wheel som uv
+# installerar i utvecklingsmiljön (pinnad i uv.lock).
+RUNTIME_URL = (
+    "https://github.com/abetlen/llama-cpp-python/releases/download/"
+    "v0.3.33-cu124/llama_cpp_python-0.3.33-py3-none-win_amd64.whl"
+)
 
 
 def model_path(cfg: dict) -> Path:
@@ -29,6 +42,110 @@ def model_installed(cfg: dict) -> bool:
     if _REMOVE_MARKER.exists():
         return False
     return model_path(cfg).is_file()
+
+
+def _bundled_runtime_dir() -> Path | None:
+    """llama_cpp-paketets egna lib-katalog (utvecklingsmiljö; i exe:n är
+    den bortstädad av build.py). find_spec importerar inte paketet — en
+    import skulle försöka ladda DLL:erna direkt."""
+    try:
+        spec = importlib.util.find_spec("llama_cpp")
+        if spec and spec.submodule_search_locations:
+            lib = Path(spec.submodule_search_locations[0]) / "lib"
+            if (lib / "llama.dll").is_file():
+                return lib
+    except Exception:
+        pass
+    return None
+
+
+def runtime_installed() -> bool:
+    if _REMOVE_MARKER.exists() and not _bundled_runtime_dir():
+        return False
+    return (
+        _bundled_runtime_dir() is not None
+        or (LLAMA_LIB_DIR / "llama.dll").is_file()
+    )
+
+
+def installed(cfg: dict) -> bool:
+    return model_installed(cfg) and runtime_installed()
+
+
+def download_size_gb(cfg: dict) -> float:
+    total = 0.0
+    if not runtime_installed():
+        total += RUNTIME_SIZE_GB
+    if not model_installed(cfg):
+        total += MODEL_SIZE_GB
+    return round(total, 1) or MODEL_SIZE_GB
+
+
+def download_all(cfg: dict, progress=None, cancelled=None) -> None:
+    """Motor + modell, det som saknas. Förloppet viktas efter storlek."""
+    need_runtime = not runtime_installed()
+    need_model = not model_installed(cfg)
+    total = (RUNTIME_SIZE_GB if need_runtime else 0) + (
+        MODEL_SIZE_GB if need_model else 0
+    )
+    offset = 0.0
+
+    def scaled(base: float, span: float):
+        if progress is None:
+            return None
+        return lambda t, f: progress(t, base + f * span)
+
+    if need_runtime:
+        span = RUNTIME_SIZE_GB / total
+        _download_runtime(scaled(0.0, span), cancelled)
+        offset = span
+    if need_model:
+        download_model(cfg, scaled(offset, 1.0 - offset), cancelled)
+    if progress:
+        progress("Klart", 1.0)
+
+
+def _download_runtime(progress=None, cancelled=None) -> None:
+    LLAMA_LIB_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = LLM_DIR / "runtime.whl.part"
+    try:
+        with urllib.request.urlopen(RUNTIME_URL, timeout=60) as r, open(
+            tmp, "wb"
+        ) as f:
+            header = r.headers.get("Content-Length")
+            expected = int(header) if header else None
+            done = 0
+            while chunk := r.read(1 << 20):
+                if cancelled and cancelled():
+                    raise InterruptedError("Nedladdningen avbröts")
+                f.write(chunk)
+                done += len(chunk)
+                if progress:
+                    progress(
+                        "Laddar ner poleringsmotorn…",
+                        min(done / (expected or 1), 0.99),
+                    )
+        if expected is not None and done != expected:
+            raise RuntimeError(
+                f"Nedladdningen avbröts i förtid ({done} av {expected} byte)"
+            )
+        root = LLAMA_LIB_DIR.resolve()
+        with zipfile.ZipFile(tmp) as z:
+            for member in z.namelist():
+                if member.startswith("llama_cpp/lib/") and member.endswith(".dll"):
+                    dest = (root / Path(member).name).resolve()
+                    if not dest.is_relative_to(root):
+                        continue  # zip-slip-skydd
+                    with z.open(member) as src, open(dest, "wb") as out:
+                        shutil.copyfileobj(src, out)
+        if not (LLAMA_LIB_DIR / "llama.dll").is_file():
+            raise RuntimeError("Motorn saknade förväntade filer")
+        log.info("Poleringsmotor installerad i %s", LLAMA_LIB_DIR)
+    except BaseException:
+        shutil.rmtree(LLAMA_LIB_DIR, ignore_errors=True)
+        raise
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def download_model(cfg: dict, progress=None, cancelled=None) -> None:
@@ -126,6 +243,10 @@ class Polisher:
             from viska.transcribe import _add_nvidia_dll_dirs
 
             _add_nvidia_dll_dirs()
+            # I exe:n är paketets egna DLL:er bortstädade (900 MB) — peka
+            # ut den eftermonterade motorn INNAN importen laddar biblioteket.
+            if _bundled_runtime_dir() is None:
+                os.environ["LLAMA_CPP_LIB_PATH"] = str(LLAMA_LIB_DIR)
             from llama_cpp import Llama
 
             path = model_path(self._cfg)

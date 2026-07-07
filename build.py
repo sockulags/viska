@@ -71,6 +71,15 @@ def main() -> None:
         cwd=ROOT,
     )
     dist = ROOT / "dist" / "Viska"
+    # llama.cpp:s CUDA-DLL:er är ~930 MB — de eftermonteras via
+    # "Ladda ner polering" i stället för att blåsa upp universalpaketet.
+    # Python-skalet (llama_cpp-paketet) följer med; motorn pekas ut i
+    # körning via LLAMA_CPP_LIB_PATH.
+    llama_lib = dist / "_internal" / "llama_cpp" / "lib"
+    if llama_lib.is_dir():
+        size_mb = sum(f.stat().st_size for f in llama_lib.rglob("*")) // 1_000_000
+        shutil.rmtree(llama_lib)
+        print(f"Städade bort bundlad llama.cpp-motor ({size_mb} MB) – opt-in i appen")
     if args.gpu:
         copy_nvidia_dlls(dist)
     suffix = "-gpu" if args.gpu else ""
