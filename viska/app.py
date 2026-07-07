@@ -726,13 +726,9 @@ def main() -> None:
 
     root = tk.Tk()
     root.withdraw()
-    try:
-        import darkdetect
-        import sv_ttk
+    from viska import ui
 
-        sv_ttk.set_theme((darkdetect.theme() or "light").lower())
-    except Exception:
-        log.debug("Kunde inte aktivera Sun Valley-temat", exc_info=True)
+    ui.refresh_theme()
     if first_run:
         from viska import firstrun
 

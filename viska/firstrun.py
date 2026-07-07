@@ -8,7 +8,7 @@ import threading
 import tkinter as tk
 from tkinter import ttk
 
-from viska import gpu
+from viska import gpu, ui
 
 
 class FirstRunDialog:
@@ -18,11 +18,13 @@ class FirstRunDialog:
         self._cancelled = False
         self._downloading = False
 
+        ui.refresh_theme()
         self.win = tk.Toplevel(root)
         self.win.title("Välkommen till Viska")
         self.win.resizable(False, False)
         self.win.attributes("-topmost", True)
         self.win.protocol("WM_DELETE_WINDOW", self._close)
+        ui.setup_window(self.win)
 
         body = ttk.Frame(self.win, padding=16)
         body.grid(sticky="nsew")

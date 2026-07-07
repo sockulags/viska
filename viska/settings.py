@@ -1,7 +1,9 @@
 """Inställningsfönster med flikar: Allmänt (klarspråk för vardagsbruk),
 Ordlista (global + per app), Avancerat (råa tekniska värden).
+
 Skapas och används enbart i huvudtråden — trayn begär öppning via App:s
-UI-kö.
+UI-kö. Alla färger går via viska.ui: inget får ärva klassiska
+tk-standardfärger (det var så Windows 2000-blandningen uppstod).
 """
 
 import os
@@ -9,6 +11,7 @@ import queue
 import tkinter as tk
 from tkinter import ttk
 
+from viska import ui
 from viska.config import CONFIG_PATH, LOG_PATH
 from viska.focus import visible_apps
 from viska.hotkey import HotkeyError, parse_hotkey
@@ -47,47 +50,14 @@ _MODIFIER_KEYSYMS = {
     "Alt_L", "Alt_R", "Win_L", "Win_R", "Super_L", "Super_R", "Caps_Lock",
 }
 
-
-def _themed_text(parent, **kwargs) -> tk.Text:
-    """tk.Text följer inte ttk-temat — och sv-ttk bygger sina fält av
-    bilder så stilslagning ger inga färger. Välj matchande palett utifrån
-    temanamnet i stället, så att ordlistorna inte lyser vita i mörkt läge."""
-    try:
-        import sv_ttk
-
-        dark = sv_ttk.get_theme() == "dark"
-    except Exception:
-        dark = False
-    bg, fg, border = (
-        ("#1c1c1c", "#fafafa", "#404040") if dark else ("#ffffff", "#1c1c1c", "#cccccc")
-    )
-    return tk.Text(
-        parent, bg=bg, fg=fg, insertbackground=fg,
-        relief="flat", highlightthickness=1,
-        highlightbackground=border, highlightcolor=border,
-        **kwargs,
-    )
-
-
-def _row(parent, label: str, hint: str | None = None):
-    frame = ttk.Frame(parent)
-    frame.pack(fill="x", pady=6)
-    left = ttk.Frame(frame)
-    left.pack(side="left", fill="x")
-    ttk.Label(left, text=label).pack(anchor="w")
-    if hint:
-        ttk.Label(left, text=hint, foreground="#888888", font=("Segoe UI", 8)).pack(
-            anchor="w"
-        )
-    holder = ttk.Frame(frame)
-    holder.pack(side="right")
-    return holder
+_FIELD_W = 30  # enhetlig fältbredd: lugn högerkant i alla flikar
 
 
 class SettingsWindow:
     def __init__(self, root: tk.Tk, cfg: dict, on_save, gpu_panel: dict | None = None):
         """on_save(ändringar: dict) -> None | str (fel visas, fönstret kvar).
         gpu_panel: {"state", "action", "label", "run"} från App._gpu_panel()."""
+        ui.refresh_theme()
         self._on_save = on_save
         self._gpu_panel = gpu_panel
         self._gpu_queue: queue.Queue = queue.Queue()
@@ -105,35 +75,35 @@ class SettingsWindow:
         self.win.title("Viska – inställningar")
         self.win.resizable(False, False)
         self.win.attributes("-topmost", True)
+        self._pal = ui.setup_window(self.win)
+        pal = self._pal
 
         notebook = ttk.Notebook(self.win)
-        notebook.pack(fill="both", expand=True, padx=10, pady=(10, 0))
-        general = ttk.Frame(notebook, padding=12)
-        wordlist = ttk.Frame(notebook, padding=12)
-        advanced = ttk.Frame(notebook, padding=12)
-        notebook.add(general, text=" Allmänt ")
-        notebook.add(wordlist, text=" Ordlista ")
-        notebook.add(advanced, text=" Avancerat ")
+        notebook.pack(fill="both", expand=True, padx=12, pady=(12, 0))
+        general = self._tab(notebook, " Allmänt ")
+        wordlist = self._tab(notebook, " Ordlista ")
+        advanced = self._tab(notebook, " Avancerat ")
 
         # ---- Allmänt --------------------------------------------------------
 
-        holder = _row(general, "Språk")
-        self._language = tk.StringVar(value=cfg["language"])
-        ttk.Radiobutton(
-            holder, text="Svenska", value="sv", variable=self._language
-        ).pack(side="left")
-        ttk.Radiobutton(
-            holder, text="Engelska", value="en", variable=self._language
-        ).pack(side="left", padx=(8, 0))
+        self._language_names = {"sv": "Svenska", "en": "Engelska"}
+        self._language = tk.StringVar(
+            value=self._language_names.get(cfg["language"], "Svenska")
+        )
+        holder = self._row(general, "Språk")
+        ui.Segmented(
+            holder, list(self._language_names.values()), self._language
+        ).frame.pack()
 
-        holder = _row(general, "Dikteringstangent", "Klicka och tryck på tangenten")
         self._hotkey = tk.StringVar(value=cfg["hotkey"])
+        holder = self._row(
+            general, "Dikteringstangent", hint="Klicka och tryck på tangenten"
+        )
         self._hotkey_btn = ttk.Button(
-            holder, text=cfg["hotkey"].upper(), width=18, command=self._capture_hotkey
+            holder, text=cfg["hotkey"].upper(), width=20, command=self._capture_hotkey
         )
         self._hotkey_btn.pack()
 
-        holder = _row(general, "Livekänsla", "Hur snabbt fraser skrivs in vid paus")
         current_feel = next(
             (
                 name
@@ -143,83 +113,80 @@ class SettingsWindow:
             ),
             "Egen",
         )
-        feel_values = list(FEELS) + (["Egen"] if current_feel == "Egen" else [])
         self._feel = tk.StringVar(value=current_feel)
-        ttk.Combobox(
-            holder, textvariable=self._feel, values=feel_values,
-            state="readonly", width=16,
-        ).pack()
+        feel_options = list(FEELS) + (["Egen"] if current_feel == "Egen" else [])
+        holder = self._row(
+            general, "Livekänsla", hint="Hur snabbt fraser skrivs in vid paus"
+        )
+        ui.Segmented(holder, feel_options, self._feel).frame.pack()
 
-        holder = _row(general, "Liveläge")
         reverse_live = {v: k for k, v in _LIVE_CHOICES.items()}
         self._live = tk.StringVar(
             value=reverse_live.get(cfg["live"], reverse_live["auto"])
         )
+        holder = self._row(general, "Liveläge")
         ttk.Combobox(
             holder, textvariable=self._live, values=list(_LIVE_CHOICES),
-            state="readonly", width=20,
+            state="readonly", width=_FIELD_W - 2,
         ).pack()
 
-        holder = _row(general, "Kvalitet (svenska)")
         reverse_q = {v: k for k, v in QUALITY.items()}
         current_q = reverse_q.get(cfg["model"], "Egen (se Avancerat)")
         q_values = list(QUALITY) + (
             ["Egen (se Avancerat)"] if current_q not in QUALITY else []
         )
         self._quality = tk.StringVar(value=current_q)
+        holder = self._row(general, "Kvalitet (svenska)")
         ttk.Combobox(
             holder, textvariable=self._quality, values=q_values,
-            state="readonly", width=26,
+            state="readonly", width=_FIELD_W - 2,
         ).pack()
 
         self._sounds = tk.BooleanVar(value=bool(cfg["sounds"]))
-        ttk.Checkbutton(general, text="Ljudsignaler", variable=self._sounds).pack(
-            anchor="w", pady=6
-        )
+        holder = self._row(general, "Ljudsignaler")
+        ttk.Checkbutton(holder, variable=self._sounds).pack()
 
         if gpu_panel is not None:
-            ttk.Separator(general).pack(fill="x", pady=8)
-            gpu_frame = ttk.Frame(general)
-            gpu_frame.pack(fill="x")
-            ttk.Label(gpu_frame, text="GPU-stöd", font=("Segoe UI", 9, "bold")).pack(
-                anchor="w"
+            ui.section(general, "GPU-stöd")
+            kind = "success" if "aktivt" in gpu_panel["state"] else "warn"
+            self._gpu_card = ui.status_card(
+                general, kind, gpu_panel["state"],
+                "" if gpu_panel.get("action") else "Inget att göra",
             )
-            self._gpu_status = ttk.Label(gpu_frame, text=gpu_panel["state"])
-            self._gpu_status.pack(anchor="w")
-            self._gpu_progress = ttk.Progressbar(gpu_frame, length=280, maximum=1.0)
+            self._gpu_card.pack(fill="x", pady=(2, 4))
+            self._gpu_status = tk.Label(
+                general, text="", bg=pal["window"], fg=pal["muted"],
+                font=("Segoe UI", 8), anchor="w",
+            )
+            self._gpu_status.pack(fill="x")
+            self._gpu_progress = ttk.Progressbar(general, length=300, maximum=1.0)
             if gpu_panel.get("action"):
                 self._gpu_button = ttk.Button(
-                    gpu_frame, text=gpu_panel["label"], command=self._run_gpu_action
+                    general, text=gpu_panel["label"], command=self._run_gpu_action
                 )
-                self._gpu_button.pack(anchor="w", pady=(4, 0))
+                self._gpu_button.pack(anchor="w", pady=(2, 0))
             self._poll_gpu()
 
         # ---- Ordlista -------------------------------------------------------
 
-        ttk.Label(wordlist, text="Global ordlista").pack(anchor="w")
-        ttk.Label(
-            wordlist,
-            text="Namn och facktermer som ska stavas rätt, t.ex. \"Avanza, Smask\".",
-            foreground="#888888", font=("Segoe UI", 8),
-        ).pack(anchor="w")
-        self._prompt = _themed_text(wordlist, width=52, height=3, wrap="word")
-        self._prompt.pack(fill="x", pady=(4, 10))
+        ui.section(wordlist, "Global ordlista")
+        self._hint(
+            wordlist, "Namn och facktermer som ska stavas rätt, t.ex. \"Avanza, Smask\"."
+        )
+        self._prompt = ui.themed_text(wordlist, width=54, height=3, wrap="word")
+        self._prompt.pack(fill="x", pady=(4, 2))
         self._prompt.insert("1.0", cfg["initial_prompt"])
 
-        ttk.Separator(wordlist).pack(fill="x", pady=4)
-        ttk.Label(wordlist, text="Per app").pack(anchor="w")
-        ttk.Label(
-            wordlist,
-            text="Extra ordlista och inskrivningssätt när en viss app har fokus.",
-            foreground="#888888", font=("Segoe UI", 8),
-        ).pack(anchor="w", pady=(0, 4))
-
-        picker = ttk.Frame(wordlist)
-        picker.pack(fill="x")
-        self._app_list = tk.Listbox(picker, height=4, exportselection=False)
+        ui.section(wordlist, "Per app")
+        self._hint(
+            wordlist, "Extra ordlista och inskrivningssätt när en viss app har fokus."
+        )
+        picker = tk.Frame(wordlist, bg=pal["window"])
+        picker.pack(fill="x", pady=(4, 0))
+        self._app_list = ui.themed_listbox(picker, height=4, exportselection=False)
         self._app_list.pack(side="left", fill="both", expand=True)
         self._app_list.bind("<<ListboxSelect>>", self._on_profile_select)
-        buttons = ttk.Frame(picker)
+        buttons = tk.Frame(picker, bg=pal["window"])
         buttons.pack(side="left", fill="y", padx=(8, 0))
         ttk.Button(buttons, text="Ny…", width=12, command=self._new_profile).pack(
             pady=2
@@ -228,33 +195,31 @@ class SettingsWindow:
             buttons, text="Ta bort", width=12, command=self._remove_profile
         ).pack(pady=2)
 
-        editor = ttk.Frame(wordlist)
-        editor.pack(fill="x", pady=(8, 0))
-        holder = _row(editor, "App (processnamn)")
         self._profile_app = tk.StringVar()
+        holder = self._row(wordlist, "App (processnamn)")
         self._profile_app_box = ttk.Combobox(
-            holder, textvariable=self._profile_app, width=28
+            holder, textvariable=self._profile_app, width=_FIELD_W - 2
         )
         self._profile_app_box.pack()
-        holder = _row(editor, "Ordlista för appen")
-        self._profile_prompt = _themed_text(holder, width=34, height=2, wrap="word")
+        holder = self._row(wordlist, "Ordlista för appen")
+        self._profile_prompt = ui.themed_text(holder, width=32, height=2, wrap="word")
         self._profile_prompt.pack()
-        holder = _row(editor, "Inskrivning")
         reverse_inject = {v: k for k, v in _INJECT_CHOICES.items()}
         self._profile_inject = tk.StringVar(value=list(_INJECT_CHOICES)[0])
+        holder = self._row(wordlist, "Inskrivning")
         ttk.Combobox(
             holder, textvariable=self._profile_inject,
-            values=list(_INJECT_CHOICES), state="readonly", width=26,
+            values=list(_INJECT_CHOICES), state="readonly", width=_FIELD_W - 2,
         ).pack()
-        holder = _row(editor, "Språk i appen", "Byts aldrig automatiskt")
         self._profile_lang = tk.StringVar(value=list(_PROFILE_LANG)[0])
+        holder = self._row(wordlist, "Språk i appen", hint="Byts aldrig automatiskt")
         ttk.Combobox(
             holder, textvariable=self._profile_lang,
-            values=list(_PROFILE_LANG), state="readonly", width=26,
+            values=list(_PROFILE_LANG), state="readonly", width=_FIELD_W - 2,
         ).pack()
         ttk.Button(
-            editor, text="Spara profil", command=self._save_profile
-        ).pack(anchor="e", pady=(4, 0))
+            wordlist, text="Spara profil", command=self._save_profile
+        ).pack(anchor="e", pady=(6, 0))
         self._reverse_inject = reverse_inject
         self._refresh_profile_list()
 
@@ -262,17 +227,17 @@ class SettingsWindow:
 
         self._adv: dict[str, tk.Variable] = {}
 
-        def adv_entry(label, key, value, width=34):
-            holder = _row(advanced, label)
+        def adv_entry(label, key, value):
             var = tk.StringVar(value="" if value is None else str(value))
-            ttk.Entry(holder, textvariable=var, width=width).pack()
+            holder = self._row(advanced, label)
+            ttk.Entry(holder, textvariable=var, width=_FIELD_W).pack()
             self._adv[key] = var
 
         def adv_combo(label, key, value, choices):
-            holder = _row(advanced, label)
             var = tk.StringVar(value="auto" if value is None else str(value))
+            holder = self._row(advanced, label)
             ttk.Combobox(
-                holder, textvariable=var, values=choices, width=32
+                holder, textvariable=var, values=choices, width=_FIELD_W - 2
             ).pack()
             self._adv[key] = var
 
@@ -283,35 +248,34 @@ class SettingsWindow:
             "Precision", "compute_type", cfg["compute_type"],
             ["auto", "float16", "int8_float16", "int8"],
         )
-        adv_entry("Beam size (tomt = auto)", "beam_size", cfg["beam_size"], width=8)
-        holder = _row(advanced, "Inskrivning (standard)")
+        adv_entry("Beam size (tomt = auto)", "beam_size", cfg["beam_size"])
         reverse_all_inject = {v: k for k, v in _INJECT_CHOICES.items()}
         self._inject = tk.StringVar(
-            value=reverse_all_inject.get(
-                cfg["inject_mode"], list(_INJECT_CHOICES)[0]
-            )
+            value=reverse_all_inject.get(cfg["inject_mode"], list(_INJECT_CHOICES)[0])
         )
+        holder = self._row(advanced, "Inskrivning (standard)")
         ttk.Combobox(
             holder, textvariable=self._inject, values=list(_INJECT_CHOICES),
-            state="readonly", width=26,
+            state="readonly", width=_FIELD_W - 2,
         ).pack()
-        adv_entry("Max inspelning (s)", "max_recording_s", cfg["max_recording_s"], 8)
-        adv_entry(
-            "Hålltröskel (s)", "hold_threshold_s", cfg["hold_threshold_s"], 8
-        )
+        adv_entry("Max inspelning (s)", "max_recording_s", cfg["max_recording_s"])
+        adv_entry("Hålltröskel (s)", "hold_threshold_s", cfg["hold_threshold_s"])
         self._restore = tk.BooleanVar(value=bool(cfg["restore_clipboard"]))
         self._append = tk.BooleanVar(value=bool(cfg["append_space"]))
         self._keep_mic = tk.BooleanVar(value=bool(cfg["keep_mic_open"]))
         self._updates = tk.BooleanVar(value=bool(cfg["check_updates"]))
+        ui.section(advanced, "Beteende")
         for text, var in (
             ("Återställ klippbordet efter inklistring", self._restore),
             ("Mellanslag efter varje diktering", self._append),
             ("Håll mikrofonströmmen öppen (ingen klippt start)", self._keep_mic),
             ("Sök efter uppdateringar vid start", self._updates),
         ):
-            ttk.Checkbutton(advanced, text=text, variable=var).pack(anchor="w")
-        files = ttk.Frame(advanced)
-        files.pack(anchor="w", pady=(8, 0))
+            ttk.Checkbutton(advanced, text=text, variable=var).pack(
+                anchor="w", pady=1
+            )
+        files = tk.Frame(advanced, bg=pal["window"])
+        files.pack(anchor="w", pady=(10, 0))
         ttk.Button(
             files, text="Öppna config-filen",
             command=lambda: os.startfile(CONFIG_PATH),
@@ -322,14 +286,54 @@ class SettingsWindow:
 
         # ---- Fot ------------------------------------------------------------
 
-        footer = ttk.Frame(self.win, padding=(10, 6, 10, 10))
-        footer.pack(fill="x")
-        self._error = ttk.Label(footer, text="", foreground="#c0392b")
+        footer = tk.Frame(self.win, bg=pal["window"])
+        footer.pack(fill="x", padx=12, pady=(6, 12))
+        self._error = tk.Label(
+            footer, text="", bg=pal["window"], fg="#e24b4a",
+            font=("Segoe UI", 8), anchor="w", justify="left",
+        )
         self._error.pack(side="left")
         ttk.Button(footer, text="Avbryt", command=self.win.destroy).pack(side="right")
-        ttk.Button(footer, text="Spara", command=self._save, style="Accent.TButton").pack(
-            side="right", padx=(0, 6)
-        )
+        ttk.Button(
+            footer, text="Spara", command=self._save, style="Accent.TButton"
+        ).pack(side="right", padx=(0, 6))
+
+    # -- Layouthjälpare ------------------------------------------------------------
+
+    def _tab(self, notebook: ttk.Notebook, title: str) -> tk.Frame:
+        # tk.Frame med ägd bakgrund — ttk.Frame kan tappa temat och falla
+        # tillbaka på klassiskt grått (det var Windows 2000-blandningen).
+        frame = tk.Frame(notebook, bg=ui.palette()["window"], padx=14, pady=10)
+        notebook.add(frame, text=title)
+        return frame
+
+    def _row(self, parent, label: str, hint: str | None = None) -> tk.Frame:
+        """Rad med etikett till vänster; returnerar hållaren till höger som
+        widgeten ska skapas i (pack med in_ renderar inte pålitligt)."""
+        pal = ui.palette()
+        frame = tk.Frame(parent, bg=pal["window"])
+        frame.pack(fill="x", pady=5)
+        left = tk.Frame(frame, bg=pal["window"])
+        left.pack(side="left")
+        tk.Label(
+            left, text=label, bg=pal["window"], fg=pal["text"],
+            font=("Segoe UI", 9), anchor="w",
+        ).pack(anchor="w")
+        if hint:
+            tk.Label(
+                left, text=hint, bg=pal["window"], fg=pal["muted"],
+                font=("Segoe UI", 8), anchor="w",
+            ).pack(anchor="w")
+        holder = tk.Frame(frame, bg=pal["window"])
+        holder.pack(side="right")
+        return holder
+
+    def _hint(self, parent, text: str) -> None:
+        pal = ui.palette()
+        tk.Label(
+            parent, text=text, bg=pal["window"], fg=pal["muted"],
+            font=("Segoe UI", 8), anchor="w", justify="left",
+        ).pack(fill="x")
 
     # -- Tangentfångst -----------------------------------------------------------
     # Bindningen sitter på KNAPPEN, inte fönstret: en fönsterbindning hade
@@ -478,8 +482,9 @@ class SettingsWindow:
     # -- Spara --------------------------------------------------------------------
 
     def values(self) -> dict:
+        lang_reverse = {v: k for k, v in self._language_names.items()}
         changes = {
-            "language": self._language.get(),
+            "language": lang_reverse.get(self._language.get(), "sv"),
             "hotkey": self._hotkey.get().strip(),
             "live": _LIVE_CHOICES[self._live.get()],
             "sounds": self._sounds.get(),
