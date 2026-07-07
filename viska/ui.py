@@ -36,21 +36,23 @@ _LIGHT = {
     "warn_fg": "#633806",
 }
 _DARK = {
+    # Fönstret följer sv-ttk (#1c1c1c); allt ovanpå måste ta rejäla kliv
+    # uppåt i ljushet — små steg flyter ihop på mörka paneler.
     "window": "#1c1c1c",
-    "surface": "#242424",
-    "field_bg": "#2b2b2b",
-    "field_fg": "#fafafa",
-    "border": "#404040",
-    "text": "#fafafa",
-    "muted": "#9a9a9a",
+    "surface": "#2d2d2d",
+    "field_bg": "#363636",
+    "field_fg": "#ffffff",
+    "border": "#5a5a5a",
+    "text": "#ffffff",
+    "muted": "#b0b0b0",
     "accent": "#60cdff",
-    "accent_fg": "#1a1a1a",
-    "chip_bg": "#333333",
-    "chip_fg": "#cccccc",
-    "success_bg": "#0f3d30",
-    "success_fg": "#9fe1cb",
-    "warn_bg": "#41300f",
-    "warn_fg": "#fac775",
+    "accent_fg": "#003049",
+    "chip_bg": "#3d3d3d",
+    "chip_fg": "#e6e6e6",
+    "success_bg": "#155844",
+    "success_fg": "#c8f2e2",
+    "warn_bg": "#5a4310",
+    "warn_fg": "#ffd98a",
 }
 
 
