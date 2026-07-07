@@ -573,21 +573,27 @@ class App:
         if self._settings is not None and self._settings.win.winfo_exists():
             self._settings.win.lift()
             return
+        # llm.installed() gör för Ollama-backend en synkron nåbarhetskoll
+        # (2 s HTTP-timeout) på huvudtråden. Kör den EN gång och återanvänd
+        # svaret i både poleringspanelen och polish_ready – annars gjordes
+        # kollen två gånger i rad och hela GUI:t kunde frysa ~4 s vid varje
+        # öppning av Inställningar när Ollama är nere.
+        polish_ready = llm.installed(self.cfg)
         self._settings = SettingsWindow(
             self.root,
             self.cfg,
             self._apply_settings,
             gpu_panel=self._gpu_panel(),
-            polish_panel=self._polish_panel(),
-            polish_ready=llm.installed(self.cfg),
+            polish_panel=self._polish_panel(polish_ready),
+            polish_ready=polish_ready,
         )
 
-    def _polish_panel(self) -> dict:
+    def _polish_panel(self, polish_ready: bool) -> dict:
         if self._llm_busy.is_set():
             return {"state": "Åtgärd pågår…", "kind": "warn", "action": None}
         key = (self.cfg["polish_hotkey"] or "f8").upper()
         if self.cfg["polish_backend"] == "ollama":
-            ok = llm.ollama_reachable(self.cfg)
+            ok = polish_ready  # redan nåbarhetskollat i _open_settings
             model = self.cfg["polish_ollama_model"]
             return {
                 "state": (
@@ -598,7 +604,7 @@ class App:
                 "kind": "ok" if ok else "warn",
                 "action": None,
             }
-        if llm.installed(self.cfg):
+        if polish_ready:
             return {
                 "state": f"installerad – markera text och tryck {key}",
                 "kind": "ok",

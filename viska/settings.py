@@ -310,7 +310,9 @@ class SettingsWindow:
         self._profile_polish.pack()
         # Flow-läge per app. Var:n skapas alltid (och laddas/sparas) så att en
         # befintlig profil behåller sitt flow-val även när kryssrutan är dold.
-        self._profile_flow = tk.BooleanVar(value=False)
+        # Startvärdet är den globala standarden: en profil utan eget val ärver
+        # den och sparas utan egen flow-nyckel (se _save_profile).
+        self._profile_flow = tk.BooleanVar(value=bool(cfg["flow"]))
         # Visa kryssrutan när poleringen är nedladdad ELLER när någon profil
         # redan har flow på: annars går en kvarglömd flow-flagga i en profil
         # (efter t.ex. "Ta bort poleringen") inte att stänga av härifrån.
@@ -555,7 +557,11 @@ class SettingsWindow:
         )
         self._profile_polish.delete("1.0", "end")
         self._profile_polish.insert("1.0", profile.get("polish_prompt", ""))
-        self._profile_flow.set(bool(profile.get("flow", False)))
+        # Visa det effektiva läget: en profil utan eget flow-val ärver den
+        # globala standarden (samma väg som _on_start väljer). Då speglar
+        # kryssrutan vad som faktiskt händer, och att bocka bort den blir ett
+        # äkta "av"-override i stället för bara ett borttaget "på".
+        self._profile_flow.set(bool(profile.get("flow", self._flow.get())))
 
     def _new_profile(self) -> None:
         self._selected_app = None
@@ -564,7 +570,8 @@ class SettingsWindow:
         self._profile_polish.delete("1.0", "end")
         self._profile_inject.set(list(_INJECT_CHOICES)[0])
         self._profile_lang.set(list(_PROFILE_LANG)[0])
-        self._profile_flow.set(False)
+        # Ny profil ärver den globala standarden tills användaren avviker.
+        self._profile_flow.set(bool(self._flow.get()))
         self._profile_app_box.config(values=visible_apps())
         self._profile_app_box.focus_set()
 
@@ -586,8 +593,14 @@ class SettingsWindow:
         lang = _PROFILE_LANG[self._profile_lang.get()]
         if lang:
             profile["language"] = lang
-        if self._profile_flow.get():
-            profile["flow"] = True
+        # Flow: skriv ett explicit override bara när profilen avviker från den
+        # globala standarden – matchar den standarden utelämnas nyckeln så
+        # profilen fortsätter ärva den (åt båda hållen). Utan avvikelsetestet
+        # gick ett "av"-override inte att uttrycka: en avbockad ruta skrev
+        # ingenting och profilen ärvde ett globalt "på" ändå, och en handskriven
+        # flow: false föll tyst bort när profilen sparades om.
+        if self._profile_flow.get() != bool(self._flow.get()):
+            profile["flow"] = self._profile_flow.get()
         if self._selected_app and self._selected_app != app:
             self._profiles.pop(self._selected_app, None)
         self._profiles[app] = profile
