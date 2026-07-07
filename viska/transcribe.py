@@ -84,6 +84,9 @@ class Transcriber:
             try:
                 if dev == "cuda":
                     _add_nvidia_dll_dirs()
+                # Loggas FÖRE laddningen: hänger den (t.ex. antivirus som
+                # skannar nyskrivna CUDA-DLL:er) ska loggen visa var.
+                log.info("Laddar %s på %s (%s)…", name, dev, compute)
                 loaded = WhisperModel(name, device=dev, compute_type=compute)
                 self._warmup(loaded)
                 self.model_name = name
