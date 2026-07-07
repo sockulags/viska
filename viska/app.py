@@ -907,35 +907,53 @@ class App:
             # loopen. Samma tillgänglighetskoll som enkeltryck gör i _do_polish,
             # men här FÖRE menyn så beskedet blir detsamma direkt i stället för
             # först efter ett val.
-            if not llm.installed(self.cfg):
+            #
+            # Hela kroppen är try/except-skyddad: _polishing sattes redan i
+            # anroparen (rad ovan) och släpps här bara via on_choose→_do_polish
+            # (finally) eller on_cancel. Kastar något oväntat INNAN menyn hunnit
+            # visas — t.ex. en tillfälligt låst LLM_DIR under en pågående
+            # modellborttagning — körs varken on_choose eller on_cancel, och då
+            # skulle flaggan annars förbli satt för alltid och tyst blockera all
+            # polering tills omstart. Fånga därför, släpp flaggan och säg till.
+            try:
+                if not llm.installed(self.cfg):
+                    self._polishing.clear()
+                    self.overlay.show(
+                        "Polering ej installerad – Inställningar → Polering",
+                        GRAY,
+                        auto_hide_ms=3000,
+                    )
+                    return
+                # Appens standard förmarkerad (style None = härleds i _do_polish,
+                # exakt som enkeltryck); sedan de fördefinierade tonerna på aktivt
+                # språk.
+                label = "Appens standard" if app_default else "Standard (allmän)"
+                options = [(label, None, True)]
+                options += [
+                    (name, task, False) for name, task in llm.tone_presets(lang)
+                ]
+
+                def on_choose(style):
+                    # Menyval: _polishing är redan satt (togs när menyn öppnades),
+                    # så gå via _run_polish som INTE guardar — annars skulle guarden
+                    # i _start_polish tyst svälja valet.
+                    self._run_polish(style, target_hwnd)
+
+                def on_cancel():
+                    # Menyn stängdes utan val (Esc, klick utanför eller timeout):
+                    # släpp upptaget-flaggan så nästa tryck fungerar igen.
+                    self._polishing.clear()
+
+                self.tone_menu.show(options, on_choose, on_cancel)
+            except Exception:
+                # Släpp flaggan FÖRST så poleringen aldrig kan låsa sig, även om
+                # själva aviseringen nedan också skulle krångla.
                 self._polishing.clear()
+                log.exception("Kunde inte öppna tonvalsmenyn")
+                self.sounds.error()
                 self.overlay.show(
-                    "Polering ej installerad – Inställningar → Polering",
-                    GRAY,
-                    auto_hide_ms=3000,
+                    "Polering misslyckades – se loggen", RED, auto_hide_ms=4000
                 )
-                return
-            # Appens standard förmarkerad (style None = härleds i _do_polish,
-            # exakt som enkeltryck); sedan de fördefinierade tonerna på aktivt
-            # språk.
-            label = "Appens standard" if app_default else "Standard (allmän)"
-            options = [(label, None, True)]
-            options += [
-                (name, task, False) for name, task in llm.tone_presets(lang)
-            ]
-
-            def on_choose(style):
-                # Menyval: _polishing är redan satt (togs när menyn öppnades),
-                # så gå via _run_polish som INTE guardar — annars skulle guarden
-                # i _start_polish tyst svälja valet.
-                self._run_polish(style, target_hwnd)
-
-            def on_cancel():
-                # Menyn stängdes utan val (Esc, klick utanför eller timeout):
-                # släpp upptaget-flaggan så nästa tryck fungerar igen.
-                self._polishing.clear()
-
-            self.tone_menu.show(options, on_choose, on_cancel)
 
         threading.Thread(
             target=prepare, daemon=True, name="viska-polish-menu"
