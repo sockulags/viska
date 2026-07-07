@@ -22,7 +22,9 @@ AUTO_MODELS = {
 }
 
 
-def _auto_cuda_choice(polish_active: bool = False) -> tuple[str, str]:
+def _auto_cuda_choice(
+    polish_active: bool = False, compute_type: str | None = None
+) -> tuple[str, str]:
     """VRAM-medvetet val: large float16 kräver ~4 GB — på små kort (t.ex.
     4 GB-laptopar) hade auto annars OOM:at och trillat ner på CPU trots
     att GPU:n räcker gott för medium i int8.
@@ -30,18 +32,32 @@ def _auto_cuda_choice(polish_active: bool = False) -> tuple[str, str]:
     Är poleringsmodellen (polish_active) aktiverad delar Whisper VRAM med
     Qwen3-4B (~2,4 GB) — large fp16 (~3 GB) + polering + marginal ryms inte
     under ~10 GB, så Whisper kvantiseras till int8_float16 (halverar dess
-    VRAM-behov) i stället för att sänka modellstorleken."""
+    VRAM-behov) i stället för att sänka modellstorleken.
+
+    compute_type är bara med för loggens skull: ett explicit värde i config
+    vinner alltid över det här valet (se _load: compute = compute_type or
+    default_compute) — utan den vetskapen skulle loggen påstå att
+    int8_float16 kommer användas även när den faktiska laddningen strax
+    efteråt loggar ett annat värde."""
     from viska.gpu import vram_gb
 
     vram = vram_gb()
     if vram is not None and vram < 6:
         return "KBLab/kb-whisper-medium", "int8_float16"
     if polish_active and vram is not None and vram < 10:
-        log.info(
-            "VRAM %.1f GB räcker inte för kb-whisper-large fp16 samtidigt "
-            "med poleringsmodellen – kör Whisper som int8_float16",
-            vram,
-        )
+        if compute_type:
+            log.info(
+                "VRAM %.1f GB räcker inte för kb-whisper-large fp16 samtidigt "
+                "med poleringsmodellen – hade valt int8_float16, men "
+                "compute_type=%s är satt explicit i config och vinner",
+                vram, compute_type,
+            )
+        else:
+            log.info(
+                "VRAM %.1f GB räcker inte för kb-whisper-large fp16 samtidigt "
+                "med poleringsmodellen – kör Whisper som int8_float16",
+                vram,
+            )
         return "KBLab/kb-whisper-large", "int8_float16"
     return "KBLab/kb-whisper-large", "float16"
 
@@ -105,7 +121,7 @@ class Transcriber:
         last_error = None
         for dev in devices:
             if model == "auto" and dev == "cuda":
-                name, default_compute = _auto_cuda_choice(polish_active)
+                name, default_compute = _auto_cuda_choice(polish_active, compute_type)
             else:
                 name = AUTO_MODELS[dev] if model == "auto" else model
                 default_compute = "float16" if dev == "cuda" else "int8"

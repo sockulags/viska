@@ -696,6 +696,11 @@ class App:
         def work():
             try:
                 llm.download_all(self.cfg, progress=progress)
+                # Poleringen delar nu VRAM med Whisper (polish_shares_gpu
+                # blir sann) – ladda om transcribern så den VRAM-medvetna
+                # kvantiseringen (transcribe._auto_cuda_choice) hinner slå
+                # till nu i stället för att vänta till nästa omstart.
+                self._load_model(self.language, force=True)
                 done(f"Polering installerad – markera text och tryck "
                      f"{self.cfg['polish_hotkey'].upper()}.")
             except Exception as e:
@@ -716,6 +721,10 @@ class App:
             try:
                 self._polisher = None
                 if llm.remove_model(self.cfg):
+                    # Poleringen delar inte längre VRAM med Whisper – ladda
+                    # om så den VRAM-medvetna kvantiseringen kan släppa
+                    # int8_float16 och gå tillbaka till full kvalitet direkt.
+                    self._load_model(self.language, force=True)
                     done("Poleringsmodellen borttagen.")
                 else:
                     done("Tas bort vid nästa start (modellen är laddad just nu).")
@@ -886,6 +895,10 @@ class App:
             or changes["device"] != old["device"]
             or changes["compute_type"] != old["compute_type"]
             or changes["beam_size"] != old["beam_size"]
+            # polish_backend avgör polish_shares_gpu (bara "builtin" delar
+            # VRAM med Whisper) – ett byte här kan därför ändra den
+            # VRAM-medvetna kvantiseringen precis som ett modellbyte.
+            or changes["polish_backend"] != old["polish_backend"]
         )
         mic_changed = changes["keep_mic_open"] != old["keep_mic_open"]
         history_persist_changed = changes["history_persist"] != old["history_persist"]
@@ -900,7 +913,10 @@ class App:
                 except OSError:
                     log.exception("Kunde inte spara historiken till disk")
             else:
-                delete_history()
+                try:
+                    delete_history()
+                except OSError:
+                    log.exception("Kunde inte radera historikfilen")
         # Ollama-nåbarheten cachas (flow-beslutet på hotkey-tråden läser
         # cachen i stället för att blocka på nätverket, se __init__). Byter
         # man hit till Ollama-backend måste cachen räknas om NU — annars läser
