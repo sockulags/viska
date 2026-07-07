@@ -33,6 +33,10 @@ log = logging.getLogger("viska")
 
 LANG_NAMES = {"sv": "svensk", "en": "engelsk"}
 
+# Flow-läget: tar poleringen längre tid än så här skrivs råtexten in i
+# stället. Diktering får aldrig blockeras av en trög eller hängande modell.
+FLOW_POLISH_TIMEOUT_S = 10.0
+
 
 class App:
     def __init__(self, root: tk.Tk, cfg: dict):
@@ -60,6 +64,11 @@ class App:
         self._session_transcriber: Transcriber | None = None
         self._session_prompt: str | None = None
         self._session_inject = cfg["inject_mode"]
+        # Flow-läge för den aktiva sessionen: fryses vid start likt de andra
+        # session-värdena, så att en ändring i Inställningar mitt i en
+        # diktering inte kan byta beteende halvvägs.
+        self._session_flow = False
+        self._session_polish_prompt = cfg["polish_prompt"]
         # En modelladdning per språk i taget — utan spärren skulle varje
         # tangenttryck i en profilerad app starta ännu en 3 GB-laddning.
         self._loading_langs: set[str] = set()
@@ -78,6 +87,10 @@ class App:
             cfg["hotkey"], cfg["hold_threshold_s"], self._on_start, self._on_stop
         )
         self._polisher: llm.Polisher | None = None
+        # Skapandet av poleringsmodellen serialiseras: både F8-flödet, flow-
+        # lägets förladdning och själva flow-poleringen kan annars försöka
+        # instansiera Polisher samtidigt.
+        self._polisher_lock = threading.Lock()
         self._polishing = threading.Event()
         self.polish_key: ActionKey | None = None
         try:
@@ -233,6 +246,13 @@ class App:
             self._session_inject = profile.get(
                 "inject_mode", self.cfg["inject_mode"]
             )
+            # Flow: polera automatiskt? Profilen ärver den globala standarden.
+            # Poleringsuppgiften är appens egen, annars den globala — samma
+            # väg som F8-flödet väljer stil.
+            self._session_flow = bool(profile.get("flow", self.cfg["flow"]))
+            self._session_polish_prompt = (
+                profile.get("polish_prompt") or self.cfg["polish_prompt"]
+            )
             self.sounds.start()
             self._set_tray_recording(True)
             self.overlay.show("Spelar in", RED, meter=True)
@@ -244,19 +264,35 @@ class App:
             self._watchdog.daemon = True
             self._watchdog.start()
             self._live_texts = []
-            if self._live_enabled(transcriber):
-                self._live = LiveWorker(
-                    transcriber,
-                    self.recorder,
-                    lang,
-                    on_commit=self._on_live_commit,
-                    on_partial=self._on_live_partial,
-                    interval_s=self.cfg["live_interval_s"],
-                    commit_silence_s=self.cfg["live_commit_silence_s"],
-                    initial_prompt=self._session_prompt,
-                )
-                self._live.start()
+            if self._session_flow:
+                # Flow: ingen liveinskrivning. Pillen får gärna förhandsvisa
+                # pågående text (preview_only), men inget skrivs in förrän
+                # dikteringen stoppas och hela transkriptet poleras. Börja
+                # ladda poleringsmodellen redan nu så den hinner bli varm.
+                self._warmup_flow_polisher()
+                if self._live_enabled(transcriber):
+                    self._start_live_worker(transcriber, lang, preview_only=True)
+            elif self._live_enabled(transcriber):
+                self._start_live_worker(transcriber, lang, preview_only=False)
             return True
+
+    def _start_live_worker(
+        self, transcriber: Transcriber, lang: str, preview_only: bool
+    ) -> None:
+        self._live = LiveWorker(
+            transcriber,
+            self.recorder,
+            lang,
+            # I preview_only-läget committas aldrig något, så on_commit anropas
+            # aldrig — men lämna inget som kan skriva in text mitt i flow.
+            on_commit=(lambda _t: None) if preview_only else self._on_live_commit,
+            on_partial=self._on_live_partial,
+            interval_s=self.cfg["live_interval_s"],
+            commit_silence_s=self.cfg["live_commit_silence_s"],
+            initial_prompt=self._session_prompt,
+            preview_only=preview_only,
+        )
+        self._live.start()
 
     def _live_enabled(self, transcriber: Transcriber) -> bool:
         live = self.cfg["live"]
@@ -312,9 +348,14 @@ class App:
             transcriber = self._session_transcriber
             prompt = self._session_prompt
             inject_mode = self._session_inject
+            flow = self._session_flow
+            polish_prompt = self._session_polish_prompt
         threading.Thread(
             target=self._finish,
-            args=(audio, lang, transcriber, live_texts, prompt, inject_mode),
+            args=(
+                audio, lang, transcriber, live_texts, prompt, inject_mode,
+                flow, polish_prompt,
+            ),
             daemon=True,
             name="viska-transcribe",
         ).start()
@@ -327,6 +368,8 @@ class App:
         live_texts: list[str],
         prompt: str | None,
         inject_mode: str,
+        flow: bool = False,
+        polish_prompt: str = "",
     ) -> None:
         try:
             if live_texts:
@@ -340,6 +383,11 @@ class App:
             if not (too_short or silent) and transcriber is not None:
                 text = transcriber.transcribe(audio, lang, initial_prompt=prompt)
                 text = commands.apply(text, self.cfg["voice_commands"])
+            if flow and text:
+                # Flow-läge: polera hela transkriptet innan inskrivning.
+                # live_texts är alltid tomt här (preview_only committar aldrig).
+                self._finish_flow(text, inject_mode, polish_prompt)
+                return
             if live_texts or text:
                 self.last_text = " ".join([*live_texts, text]).strip()
                 self.history.appendleft(self.last_text)
@@ -365,6 +413,87 @@ class App:
         finally:
             self._transcribing.clear()
 
+    # -- Flow-läge (automatisk polering före inskrivning) ---------------------------
+
+    def _finish_flow(self, raw: str, inject_mode: str, polish_prompt: str) -> None:
+        """Polerar hela dikteringen och skriver in resultatet på en gång.
+        Både råtexten (först) och den polerade texten (överst) hamnar i
+        historiken. Är poleringen otillgänglig, kastar fel eller tar för
+        lång tid skrivs råtexten in precis som en vanlig diktering –
+        dikteringen får aldrig gå förlorad."""
+        # Rå först i historiken: kraschar något efter det här går råversionen
+        # ändå att hämta via traymenyn.
+        self.last_text = raw
+        self.history.appendleft(raw)
+        self._refresh_tray_menu()
+        polished = self._polish_for_flow(raw, polish_prompt)
+        if polished and polished.strip() and polished.strip() != raw.strip():
+            self.last_text = polished
+            self.history.appendleft(polished)  # polerad överst
+            self._refresh_tray_menu()
+            out = polished
+        else:
+            out = raw
+        if self.cfg["append_space"] and not out.endswith("\n"):
+            out += " "
+        inject(out, inject_mode, self.cfg["restore_clipboard"])
+        self.overlay.hide()
+
+    def _polish_for_flow(self, text: str, style: str) -> str | None:
+        """Polerar text med hård tidsgräns. Returnerar den polerade texten,
+        eller None om poleringen är otillgänglig, misslyckas eller tar mer än
+        FLOW_POLISH_TIMEOUT_S sekunder (då skrivs råtexten in)."""
+        if not llm.installed(self.cfg):
+            return None
+        self.overlay.show("Polerar…", BLUE)
+        result: dict[str, str] = {}
+
+        def work():
+            try:
+                if self.cfg["polish_backend"] == "ollama":
+                    result["text"] = llm.polish_ollama(self.cfg, text, style)
+                else:
+                    polisher = self._get_polisher()
+                    polisher.ensure_loaded()
+                    result["text"] = polisher.polish(text, style)
+            except Exception:
+                log.exception("Flow-poleringen misslyckades – skriver in råtext")
+
+        worker = threading.Thread(
+            target=work, daemon=True, name="viska-flow-polish"
+        )
+        worker.start()
+        worker.join(timeout=FLOW_POLISH_TIMEOUT_S)
+        if worker.is_alive():
+            # Tråden lever kvar och slutför i tysthet (modellen blir varm till
+            # nästa gång) – men vi väntar inte, råtexten skrivs in nu.
+            log.warning("Flow-poleringen tog för lång tid – skriver in råtext")
+            return None
+        return result.get("text")
+
+    def _get_polisher(self) -> llm.Polisher:
+        with self._polisher_lock:
+            if self._polisher is None:
+                self._polisher = llm.Polisher(self.cfg)
+            return self._polisher
+
+    def _warmup_flow_polisher(self) -> None:
+        """Börjar ladda in poleringsmodellen i bakgrunden när en flow-session
+        startar, så att den är varm när dikteringen stoppas. Idempotent –
+        ensure_loaded returnerar direkt om modellen redan är laddad."""
+        if self.cfg["polish_backend"] == "ollama" or not llm.installed(self.cfg):
+            return
+
+        def work():
+            try:
+                self._get_polisher().ensure_loaded()
+            except Exception:
+                log.exception("Kunde inte förladda flow-poleringsmodellen")
+
+        threading.Thread(
+            target=work, daemon=True, name="viska-flow-warmup"
+        ).start()
+
     # -- Inställningar ---------------------------------------------------------------
 
     def request_settings(self) -> None:
@@ -381,6 +510,7 @@ class App:
             self._apply_settings,
             gpu_panel=self._gpu_panel(),
             polish_panel=self._polish_panel(),
+            polish_ready=llm.installed(self.cfg),
         )
 
     def _polish_panel(self) -> dict:
@@ -663,10 +793,10 @@ class App:
                 else:
                     if self._polisher is None:
                         self.overlay.show("Laddar poleringsmodellen…", GRAY)
-                        self._polisher = llm.Polisher(self.cfg)
-                    self._polisher.ensure_loaded()
+                    polisher = self._get_polisher()
+                    polisher.ensure_loaded()
                     self.overlay.show("Polerar…", BLUE)
-                    result = self._polisher.polish(text, style)
+                    result = polisher.polish(text, style)
             except Exception:
                 log.exception("Poleringen misslyckades")
                 restore_original_clipboard()

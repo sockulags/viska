@@ -33,6 +33,7 @@ class LiveWorker:
         commit_silence_s: float = 0.45,
         max_window_s: float = 18.0,
         initial_prompt: str | None = None,
+        preview_only: bool = False,
     ):
         self.transcriber = transcriber
         self.recorder = recorder
@@ -43,6 +44,10 @@ class LiveWorker:
         self.commit_silence_s = commit_silence_s
         self.max_window_s = max_window_s
         self.initial_prompt = initial_prompt
+        # Flow-läget: förhandsvisa pågående text men committa aldrig — inget
+        # skrivs in förrän dikteringen är klar (då poleras hela transkriptet).
+        # committed_frames stannar på 0 så att _finish transkriberar allt.
+        self.preview_only = preview_only
         self.committed_frames = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(
@@ -98,7 +103,7 @@ class LiveWorker:
         if not segments:
             return
         final = []
-        if not window_offset:
+        if not window_offset and not self.preview_only:
             # Committa den längsta prefixen av segment som var och en följs
             # av verifierad tystnad i själva vågformen — tidsstämplar från
             # Whisper/VAD räcker inte för att veta att talet är färdigt.

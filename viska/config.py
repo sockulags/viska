@@ -48,7 +48,9 @@ DEFAULTS = {
     # Profiler per app: nyckel = processnamn (gemener, t.ex. "code.exe").
     # Värden: initial_prompt (ordlista utöver den globala), inject_mode
     # ("paste"/"type"), language ("sv"/"en"; utelämnad = aktivt språk —
-    # språk byts ALDRIG automatiskt utan bara via uttrycklig profil).
+    # språk byts ALDRIG automatiskt utan bara via uttrycklig profil),
+    # polish_prompt (egen uppgift vid polering) och flow (true = polera
+    # dikteringen automatiskt; utelämnad = ärver den globala "flow" nedan).
     "app_profiles": {},
     # Röstkommandon: talade fraser som blir formatering i stället för
     # text. Lägg till egna eller ta bort rader för att stänga av.
@@ -74,6 +76,12 @@ DEFAULTS = {
     # Filnamn i %APPDATA%\viska\llm — eller en absolut sökväg till en egen
     # GGUF (t.ex. en Ollama-blob).
     "polish_model_file": "Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
+    # Flow-läge (Wispr Flow-stil): polera hela dikteringen automatiskt
+    # innan den skrivs in, i stället för att skriva in råtexten. Global
+    # standard som profiler ärver; slås på per app via "flow" i
+    # app_profiles. Är poleringen otillgänglig, kastar fel eller tar för
+    # lång tid skrivs råtexten in precis som vanlig diktering.
+    "flow": False,
     # Dikteringshistorik i traymenyn (hålls enbart i RAM, aldrig på disk).
     "history_size": 20,
     # Kolla efter ny version mot GitHub releases vid start (endast en

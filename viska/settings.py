@@ -110,11 +110,15 @@ class SettingsWindow:
         on_save,
         gpu_panel: dict | None = None,
         polish_panel: dict | None = None,
+        polish_ready: bool = False,
     ):
         """on_save(ändringar: dict) -> None | str (fel visas, fönstret kvar).
-        Panelerna kommer från App._gpu_panel()/_polish_panel()."""
+        Panelerna kommer från App._gpu_panel()/_polish_panel().
+        polish_ready: True när poleringen är nedladdad/nåbar – annars visas
+        en hjälptext i stället för flow-lägets (döda) kryssrutor."""
         ui.refresh_theme()
         self._on_save = on_save
+        self._polish_ready = polish_ready
         self._orig_model = cfg["model"]
         # Tål handredigerad config: hoppa över trasiga profilposter.
         self._profiles = {
@@ -209,6 +213,10 @@ class SettingsWindow:
         if gpu_panel is not None:
             ui.section(general, "GPU-stöd")
             _ActionPanel(general, self.win, gpu_panel)
+        # Flow-läge (global standard). Var:n skapas alltid så att befintlig
+        # config bevaras vid spara; kryssrutan visas bara när poleringen är
+        # nedladdad, annars en hjälptext (ingen död kryssruta).
+        self._flow = tk.BooleanVar(value=bool(cfg["flow"]))
         if polish_panel is not None:
             ui.section(general, "Polering (AI)")
             self._hint(
@@ -217,6 +225,19 @@ class SettingsWindow:
                 "lokalt. Uppgift per app ställs in under Ordlista.",
             )
             _ActionPanel(general, self.win, polish_panel)
+            if polish_ready:
+                holder = self._row(
+                    general,
+                    "Flow-läge (alla appar)",
+                    hint="Polera dikteringen automatiskt innan den skrivs in",
+                )
+                ttk.Checkbutton(holder, variable=self._flow).pack()
+            else:
+                self._hint(
+                    general,
+                    "Flow-läge (automatisk polering av dikteringen) blir "
+                    "tillgängligt när poleringen laddats ner ovan.",
+                )
 
         # ---- Ordlista -------------------------------------------------------
 
@@ -273,6 +294,21 @@ class SettingsWindow:
         )
         self._profile_polish = ui.themed_text(holder, width=32, height=2, wrap="word")
         self._profile_polish.pack()
+        # Flow-läge per app. Var:n skapas alltid (och laddas/sparas) så att en
+        # befintlig profil behåller sitt flow-val även när kryssrutan är dold;
+        # den visas bara när poleringen är nedladdad.
+        self._profile_flow = tk.BooleanVar(value=False)
+        if polish_ready:
+            holder = self._row(
+                wordlist, "Flow-läge", hint="Polera dikteringen automatiskt"
+            )
+            ttk.Checkbutton(holder, variable=self._profile_flow).pack()
+        else:
+            self._hint(
+                wordlist,
+                "Flow-läge (automatisk polering) blir tillgängligt när "
+                "poleringen laddats ner.",
+            )
         ttk.Button(
             wordlist, text="Spara profil", command=self._save_profile
         ).pack(anchor="e", pady=(6, 0))
@@ -496,6 +532,7 @@ class SettingsWindow:
         )
         self._profile_polish.delete("1.0", "end")
         self._profile_polish.insert("1.0", profile.get("polish_prompt", ""))
+        self._profile_flow.set(bool(profile.get("flow", False)))
 
     def _new_profile(self) -> None:
         self._selected_app = None
@@ -504,6 +541,7 @@ class SettingsWindow:
         self._profile_polish.delete("1.0", "end")
         self._profile_inject.set(list(_INJECT_CHOICES)[0])
         self._profile_lang.set(list(_PROFILE_LANG)[0])
+        self._profile_flow.set(False)
         self._profile_app_box.config(values=visible_apps())
         self._profile_app_box.focus_set()
 
@@ -525,6 +563,8 @@ class SettingsWindow:
         lang = _PROFILE_LANG[self._profile_lang.get()]
         if lang:
             profile["language"] = lang
+        if self._profile_flow.get():
+            profile["flow"] = True
         if self._selected_app and self._selected_app != app:
             self._profiles.pop(self._selected_app, None)
         self._profiles[app] = profile
@@ -550,6 +590,7 @@ class SettingsWindow:
             "sounds": self._sounds.get(),
             "initial_prompt": self._prompt.get("1.0", "end").strip(),
             "polish_prompt": self._polish_prompt.get("1.0", "end").strip(),
+            "flow": self._flow.get(),
             "app_profiles": dict(self._profiles),
             "inject_mode": _INJECT_CHOICES[self._inject.get()],
             "restore_clipboard": self._restore.get(),

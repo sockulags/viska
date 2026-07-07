@@ -88,6 +88,17 @@ en sekund. Obs: en liten modell kan göra små språkliga missar — läs
 igenom innan du skickar något viktigt. Modellen byts under
 `polish_model_repo`/`polish_model_file` i config.
 
+**Flow-läge** kör samma polering på *dikteringen* i stället för markerad
+text: talet skrivs inte in medan du pratar (pillen förhandsvisar det
+bara), och när du stoppar poleras hela transkriptet automatiskt och
+skrivs in på en gång — precis som Wispr Flow. Slå på det globalt eller per
+app i Inställningar (kryssrutan visas när poleringen är nedladdad); en
+app-profil kan kombinera flow med sin egen poleringsprompt, t.ex. "omforma
+till ett artigt mejl". Skulle poleringen vara otillgänglig, krångla eller
+ta för lång tid skrivs råtexten in precis som vanligt — dikteringen går
+aldrig förlorad. Både rå- och den polerade versionen hamnar i historiken
+(råtexten går att hämta i traymenyn).
+
 ### Liveläge
 
 Med GPU skrivs texten in **medan du pratar**: varje fras blir färdig när
