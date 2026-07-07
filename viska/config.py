@@ -50,6 +50,14 @@ DEFAULTS = {
     # ("paste"/"type"), language ("sv"/"en"; utelämnad = aktivt språk —
     # språk byts ALDRIG automatiskt utan bara via uttrycklig profil).
     "app_profiles": {},
+    # Röstkommandon: talade fraser som blir formatering i stället för
+    # text. Lägg till egna eller ta bort rader för att stänga av.
+    "voice_commands": {
+        "ny rad": "\n",
+        "nytt stycke": "\n\n",
+        "new line": "\n",
+        "new paragraph": "\n\n",
+    },
     # Dikteringshistorik i traymenyn (hålls enbart i RAM, aldrig på disk).
     "history_size": 20,
     # Kolla efter ny version mot GitHub releases vid start (endast en

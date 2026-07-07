@@ -63,6 +63,15 @@ ordlista, eget inskrivningssätt (t.ex. tecken för tecken i terminaler)
 och — om du uttryckligen väljer det — eget språk. Språk byts aldrig
 automatiskt.
 
+**Röstkommandon:** säg "ny rad" eller "nytt stycke" (engelska: "new
+line", "new paragraph") så skrivs radbrytning i stället för orden.
+Fraserna redigeras under `voice_commands` i config-filen — ta bort en
+rad för att stänga av den. Obs: radbrytningar i terminaler kan trigga
+"klistra in flera rader?"-varningen.
+
+**Starta med Windows:** kryssruta i Inställningar → Allmänt (eller
+`--install-autostart` från terminal).
+
 ### Liveläge
 
 Med GPU skrivs texten in **medan du pratar**: varje fras blir färdig när

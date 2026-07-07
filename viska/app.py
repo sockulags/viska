@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from viska import __version__, gpu, update
+from viska import __version__, autostart, commands, gpu, update
 from viska.audio import SAMPLE_RATE, Recorder
 from viska.config import CONFIG_DIR, CONFIG_PATH, LOG_PATH, load, save
 from viska.focus import foreground_app
@@ -251,11 +251,14 @@ class App:
         return bool(live)
 
     def _on_live_commit(self, text: str) -> None:
+        text = commands.apply(text, self.cfg["voice_commands"])
         self._live_texts.append(text)
         try:
             # Mellanslag mellan fraser oavsett append_space — annars klistras
-            # nästa fras fast i den förra.
-            inject(text + " ", self._session_inject, self.cfg["restore_clipboard"])
+            # nästa fras fast i den förra. Men aldrig efter en radbrytning.
+            if not text.endswith("\n"):
+                text += " "
+            inject(text, self._session_inject, self.cfg["restore_clipboard"])
         except Exception:
             # Frasen finns kvar i last_text (traymenyn: Kopiera senaste).
             log.exception("Kunde inte skriva in livefrasen")
@@ -322,6 +325,7 @@ class App:
             silent = audio.size == 0 or float(np.abs(audio).max()) < 0.003
             if not (too_short or silent) and transcriber is not None:
                 text = transcriber.transcribe(audio, lang, initial_prompt=prompt)
+                text = commands.apply(text, self.cfg["voice_commands"])
             if live_texts or text:
                 self.last_text = " ".join([*live_texts, text]).strip()
                 self.history.appendleft(self.last_text)
@@ -334,7 +338,7 @@ class App:
                 else:
                     self.overlay.hide()
                 return
-            if self.cfg["append_space"]:
+            if self.cfg["append_space"] and not text.endswith("\n"):
                 text += " "
             inject(text, inject_mode, self.cfg["restore_clipboard"])
             self.overlay.hide()
@@ -438,6 +442,14 @@ class App:
         # aldrig gå att stoppa) och det som sagts hittills ginge förlorat.
         if self.hotkey.force_stop():
             self._on_stop()
+        # Autostart är tillstånd (Startup-genvägen), inte config.
+        wants_autostart = changes.pop("autostart", None)
+        if wants_autostart is not None and wants_autostart != autostart.enabled():
+            try:
+                autostart.install() if wants_autostart else autostart.uninstall()
+            except Exception:
+                log.exception("Kunde inte ändra autostart")
+                return "Kunde inte ändra Starta med Windows – se loggen"
         old = self.cfg
         if (
             changes["hotkey"] != old["hotkey"]
@@ -598,48 +610,6 @@ def make_tray(app: App):
     return icon
 
 
-# -- Autostart -------------------------------------------------------------------------
-
-
-def _startup_lnk() -> Path:
-    return (
-        Path(os.environ["APPDATA"])
-        / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
-        / "Viska.lnk"
-    )
-
-
-def install_autostart() -> None:
-    import win32com.client
-
-    if getattr(sys, "frozen", False):  # PyInstaller-exe
-        target = Path(sys.executable)
-        args = ""
-        workdir = target.parent
-    else:
-        pythonw = Path(sys.executable).with_name("pythonw.exe")
-        target = pythonw if pythonw.exists() else Path(sys.executable)
-        args = "-m viska"
-        workdir = Path(__file__).resolve().parents[1]
-    shell = win32com.client.Dispatch("WScript.Shell")
-    lnk = shell.CreateShortCut(str(_startup_lnk()))
-    lnk.TargetPath = str(target)
-    lnk.Arguments = args
-    lnk.WorkingDirectory = str(workdir)
-    lnk.Description = "Viska – lokal diktering"
-    lnk.Save()
-    print(f"Autostart installerad: {_startup_lnk()}")
-
-
-def uninstall_autostart() -> None:
-    lnk = _startup_lnk()
-    if lnk.exists():
-        lnk.unlink()
-        print("Autostart borttagen.")
-    else:
-        print("Ingen autostart-genväg hittades.")
-
-
 # -- CLI ----------------------------------------------------------------------------------
 
 
@@ -707,10 +677,14 @@ def main() -> None:
         print(sd.query_devices())
         return
     if args.install_autostart:
-        install_autostart()
+        print(f"Autostart installerad: {autostart.install()}")
         return
     if args.uninstall_autostart:
-        uninstall_autostart()
+        print(
+            "Autostart borttagen."
+            if autostart.uninstall()
+            else "Ingen autostart-genväg hittades."
+        )
         return
     if args.check or args.transcribe:
         lang = args.language or cfg["language"]

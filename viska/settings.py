@@ -11,7 +11,7 @@ import queue
 import tkinter as tk
 from tkinter import ttk
 
-from viska import ui
+from viska import autostart, ui
 from viska.config import CONFIG_PATH, LOG_PATH
 from viska.focus import visible_apps
 from viska.hotkey import HotkeyError, parse_hotkey
@@ -146,6 +146,12 @@ class SettingsWindow:
         holder = self._row(general, "Ljudsignaler")
         ttk.Checkbutton(holder, variable=self._sounds).pack()
 
+        # Tillståndet läses från Startup-genvägen, inte config — kan
+        # aldrig hamna i osynk med verkligheten.
+        self._autostart = tk.BooleanVar(value=autostart.enabled())
+        holder = self._row(general, "Starta med Windows")
+        ttk.Checkbutton(holder, variable=self._autostart).pack()
+
         if gpu_panel is not None:
             ui.section(general, "GPU-stöd")
             kind = "success" if "aktivt" in gpu_panel["state"] else "warn"
@@ -222,6 +228,13 @@ class SettingsWindow:
         ).pack(anchor="e", pady=(6, 0))
         self._reverse_inject = reverse_inject
         self._refresh_profile_list()
+
+        ui.section(wordlist, "Röstkommandon")
+        self._hint(
+            wordlist,
+            "Säg \"ny rad\" eller \"nytt stycke\" så skrivs radbrytning i stället.\n"
+            "Fraserna redigeras under voice_commands i config-filen.",
+        )
 
         # ---- Avancerat ------------------------------------------------------
 
@@ -484,6 +497,7 @@ class SettingsWindow:
     def values(self) -> dict:
         lang_reverse = {v: k for k, v in self._language_names.items()}
         changes = {
+            "autostart": self._autostart.get(),  # tillstånd, inte config
             "language": lang_reverse.get(self._language.get(), "sv"),
             "hotkey": self._hotkey.get().strip(),
             "live": _LIVE_CHOICES[self._live.get()],
