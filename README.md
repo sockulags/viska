@@ -47,23 +47,33 @@ Texten klistras in där markören är: i mejl, chattar, Word, webbläsare,
 kodredigerare. En remsa nertill på skärmen visar läget (spelar in /
 transkriberar) och korta pip markerar start och stopp.
 
-**Traymenyn** (högerklick på ikonen): Inställningar (fönster med språk,
-modell, tangent, liveläge, ljud och ordlista), växla svenska/engelska,
-kopiera senaste dikteringen igen (om den hamnade fel), byta till ny
-standardmikrofon, öppna config/logg, avsluta.
+**Traymenyn** (högerklick på ikonen; röd under inspelning): Inställningar,
+historik (senaste dikteringarna, klicka för att kopiera — hålls enbart i
+RAM), växla svenska/engelska, byta mikrofon, avsluta. Finns en ny version
+på GitHub visas en hämta-rad överst.
 
-**Ordlista/kontext:** skriv in namn och facktermer i Inställningar
-(t.ex. "Avanza, Smask") så stavar modellen dem rätt — motsvarigheten
-till Wispr Flows ordlista, via Whispers initial prompt.
+**Inställningarna** har tre flikar: *Allmänt* (språk, tangent med
+tryck-för-att-välja, livekänsla Lugn/Normal/Snabb, kvalitet i klartext,
+GPU-stöd), *Ordlista* (global + per app) och *Avancerat* (råa tekniska
+värden för den som vill).
+
+**Ordlista:** skriv in namn och facktermer (t.ex. "Avanza, Smask") så
+stavar modellen dem rätt. **Per app-profiler:** ge en app egen extra
+ordlista, eget inskrivningssätt (t.ex. tecken för tecken i terminaler)
+och — om du uttryckligen väljer det — eget språk. Språk byts aldrig
+automatiskt.
 
 ### Liveläge
 
 Med GPU skrivs texten in **medan du pratar**: varje fras blir färdig när
-du gör en kort paus (~0,6 s) och skrivs in direkt, medan frasen du håller
-på med förhandsvisas i remsan nertill. Whisper är ingen streamingmodell,
-så redan inskriven text kan inte ändras i efterhand — det är därför bara
-färdiga fraser skrivs in, aldrig den pågående. Stäng av med `"live":
-false` i config om du hellre får hela dikteringen på en gång.
+du gör en kort paus och skrivs in direkt, medan frasen du håller på med
+förhandsvisas i pillen nertill (med levande ljudnivåmätare). Slutar
+frasen med punkt/frågetecken räcker en kortare paus — inskrivningen
+följer meningsrytmen. Whisper är ingen streamingmodell, så redan
+inskriven text kan inte ändras i efterhand — det är därför bara färdiga
+fraser skrivs in, aldrig den pågående. Känslan justeras i Inställningar
+(Livekänsla: Lugn/Normal/Snabb); stäng av liveläget helt där om du
+hellre får hela dikteringen på en gång.
 
 ## Konfiguration
 

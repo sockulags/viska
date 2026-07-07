@@ -1,6 +1,6 @@
 [project]
 name = "viska"
-version = "0.1.0"
+version = "0.2.0"
 description = "Lokal diktering för Windows – tala var som helst, texten skrivs där markören är. Ingen data lämnar datorn."
 requires-python = ">=3.11"
 dependencies = [
@@ -11,6 +11,8 @@ dependencies = [
     "pystray>=0.19",
     "Pillow>=10",
     "pywin32>=306",
+    "sv-ttk>=2.6.1",
+    "darkdetect>=0.8.0",
 ]
 
 [project.optional-dependencies]

@@ -32,6 +32,7 @@ class LiveWorker:
         interval_s: float = 0.4,
         commit_silence_s: float = 0.45,
         max_window_s: float = 18.0,
+        initial_prompt: str | None = None,
     ):
         self.transcriber = transcriber
         self.recorder = recorder
@@ -41,6 +42,7 @@ class LiveWorker:
         self.interval_s = interval_s
         self.commit_silence_s = commit_silence_s
         self.max_window_s = max_window_s
+        self.initial_prompt = initial_prompt
         self.committed_frames = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(
@@ -88,7 +90,9 @@ class LiveWorker:
             audio = audio[-int(12.0 * SAMPLE_RATE):]
         if float(np.abs(audio).max()) < 0.003:
             return
-        segments = self.transcriber.transcribe_segments(audio, self.language)
+        segments = self.transcriber.transcribe_segments(
+            audio, self.language, initial_prompt=self.initial_prompt
+        )
         if self._stop.is_set():
             return  # stoppad under transkriberingen: resten tas batchvis
         if not segments:
@@ -98,8 +102,16 @@ class LiveWorker:
             # Committa den längsta prefixen av segment som var och en följs
             # av verifierad tystnad i själva vågformen — tidsstämplar från
             # Whisper/VAD räcker inte för att veta att talet är färdigt.
+            # Slutar frasen med skiljetecken har Whisper hört ett meningsslut:
+            # då räcker en kortare paus — inskrivningen följer talrytmen.
             for s in segments:
-                if self._followed_by_silence(audio, s.end):
+                ends_sentence = s.text.rstrip().endswith((".", "!", "?", "…"))
+                needed = (
+                    max(0.25, self.commit_silence_s - 0.15)
+                    if ends_sentence
+                    else self.commit_silence_s
+                )
+                if self._followed_by_silence(audio, s.end, needed):
                     final.append(s)
                 else:
                     break
@@ -123,8 +135,10 @@ class LiveWorker:
         except Exception:
             log.exception("on_partial misslyckades")
 
-    def _followed_by_silence(self, audio: np.ndarray, end_s: float) -> bool:
-        need = int(self.commit_silence_s * SAMPLE_RATE)
+    def _followed_by_silence(
+        self, audio: np.ndarray, end_s: float, silence_s: float
+    ) -> bool:
+        need = int(silence_s * SAMPLE_RATE)
         start = int(end_s * SAMPLE_RATE)
         window = audio[start : start + need]
         if len(window) < need:

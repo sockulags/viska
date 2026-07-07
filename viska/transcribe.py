@@ -107,16 +107,19 @@ class Transcriber:
         segments, _ = model.transcribe(silence, beam_size=1)
         list(segments)
 
-    def transcribe_segments(self, audio, language: str | None = "sv") -> list:
+    def transcribe_segments(
+        self, audio, language: str | None = "sv", initial_prompt: str | None = None
+    ) -> list:
         """Som transcribe(), men returnerar segmentlistan med tidsstämplar —
         liveläget behöver veta var i ljudet varje fras slutar."""
         if language == "auto":
             language = None
+        prompt = initial_prompt if initial_prompt is not None else self.initial_prompt
         segments, _info = self._model.transcribe(
             audio,
             language=language,
             beam_size=self.beam_size,
-            initial_prompt=self.initial_prompt or None,
+            initial_prompt=prompt or None,
             vad_filter=True,
             # Kortare padding än batchläget: segmentslutet hamnar närmare
             # verkligt talslut, så tystnadsfönstret som krävs för commit
@@ -127,15 +130,18 @@ class Transcriber:
         )
         return list(segments)
 
-    def transcribe(self, audio, language: str | None = "sv") -> str:
+    def transcribe(
+        self, audio, language: str | None = "sv", initial_prompt: str | None = None
+    ) -> str:
         """`audio` är en float32-array i 16 kHz, eller en sökväg till en ljudfil."""
         if language == "auto":
             language = None
+        prompt = initial_prompt if initial_prompt is not None else self.initial_prompt
         segments, _info = self._model.transcribe(
             audio,
             language=language,
             beam_size=self.beam_size,
-            initial_prompt=self.initial_prompt or None,
+            initial_prompt=prompt or None,
             # Silero-VAD klipper tystnad i kanterna; utan den hallucinerar
             # Whisper undertextfraser ("Undertexter från Amara.org") på
             # svenska tystnadsklipp. Explicita värden — defaults har ändrats

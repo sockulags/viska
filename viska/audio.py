@@ -41,6 +41,7 @@ class Recorder:
         self._stream_lock = threading.Lock()
         self._stream = None
         self._last_frame_t = 0.0
+        self.level = 0.0
         if keep_open:
             try:
                 with self._stream_lock:
@@ -101,6 +102,9 @@ class Recorder:
 
     def _callback(self, indata, frames, time_info, status) -> None:
         self._last_frame_t = time.monotonic()
+        # Nivå för overlayns mätare; läses från GUI-tråden utan lås
+        # (float-skrivning är atomär, värdet är rent kosmetiskt).
+        self.level = float(np.sqrt(np.mean(indata**2)))
         with self._lock:
             if self._chunks is not None:
                 self._chunks.append(indata.copy())

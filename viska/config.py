@@ -45,6 +45,16 @@ DEFAULTS = {
     # pågående frasen förhandsvisas i overlayn. "auto" = på när GPU
     # används (CPU hinner inte transkribera om i realtid). Även true/false.
     "live": "auto",
+    # Profiler per app: nyckel = processnamn (gemener, t.ex. "code.exe").
+    # Värden: initial_prompt (ordlista utöver den globala), inject_mode
+    # ("paste"/"type"), language ("sv"/"en"; utelämnad = aktivt språk —
+    # språk byts ALDRIG automatiskt utan bara via uttrycklig profil).
+    "app_profiles": {},
+    # Dikteringshistorik i traymenyn (hålls enbart i RAM, aldrig på disk).
+    "history_size": 20,
+    # Kolla efter ny version mot GitHub releases vid start (endast en
+    # versionssiffra hämtas; ingen data skickas).
+    "check_updates": True,
     # Hur ofta ljudet omtranskriberas, och hur lång paus som gör en fras
     # färdig (färdig text skrivs in och kan inte ändras i efterhand).
     # Lägre = snabbare inskrivning men committar hellre vid korta pauser.

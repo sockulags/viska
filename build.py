@@ -61,8 +61,10 @@ def main() -> None:
             "--noconfirm", "--clean", "--windowed",
             "--name", "Viska",
             "--icon", str(ico),
-            # faster-whisper har Silero-VAD-modellen som paketdata
+            # faster-whisper har Silero-VAD-modellen som paketdata;
+            # sv-ttk har temat som tcl-filer
             "--collect-data", "faster_whisper",
+            "--collect-data", "sv_ttk",
             str(ROOT / "run_viska.py"),
         ],
         check=True,
