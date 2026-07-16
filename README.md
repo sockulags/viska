@@ -1,278 +1,217 @@
 # Viska
 
-Lokal diktering för Windows — tryck en tangent, prata, och texten skrivs
-där markören är, i vilken app som helst. Som Wispr Flow, fast **allt körs
-på din egen dator**: ljudet lämnar aldrig maskinen.
+<p align="center">
+  <strong>Fast, local-first dictation and AI text refinement for Windows.</strong>
+</p>
 
-Taligenkänningen görs av [KB-Whisper](https://huggingface.co/KBLab/kb-whisper-large)
-— Kungliga bibliotekets svensktränade Whisper-modeller (50 000+ timmar
-svenskt tal, ca 47 % lägre felprocent på svenska än OpenAI:s största
-Whisper-modell) — via [faster-whisper](https://github.com/SYSTRAN/faster-whisper).
+<p align="center">
+  <a href="https://github.com/sockulags/viska/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/sockulags/viska?style=flat-square&color=49b9ef"></a>
+  <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-49b9ef?style=flat-square&logo=windows">
+  <img alt="Python 3.11 or newer" src="https://img.shields.io/badge/Python-3.11%2B-49b9ef?style=flat-square&logo=python&logoColor=white">
+  <img alt="Local first" src="https://img.shields.io/badge/data-local--first-49b9ef?style=flat-square">
+</p>
 
-## Krav
+<p align="center">
+  <a href="https://github.com/sockulags/viska/releases/latest"><strong>Download Viska</strong></a>
+  ·
+  <a href="#quick-start">Quick start</a>
+  ·
+  <a href="#how-it-works">How it works</a>
+</p>
 
-- Windows 11 (10 fungerar sannolikt också)
-- Python 3.11+ och [uv](https://docs.astral.sh/uv/)
-- Mikrofon
-- NVIDIA-GPU rekommenderas (transkribering på under en sekund); utan GPU
-  används CPU med en mindre modell — fortfarande snabbt nog för diktering
+Hold a key, speak, and Viska writes the result at the cursor in almost any Windows app.
+It can also rewrite selected text—or polish an entire dictation before inserting it—using
+a small language model that runs on your own computer.
 
-## Installation
+Swedish speech recognition uses the Royal Swedish Library's
+[KB-Whisper](https://huggingface.co/KBLab/kb-whisper-large) models through
+[faster-whisper](https://github.com/SYSTRAN/faster-whisper). English dictation uses a
+separate multilingual Whisper model. Audio and text are processed locally.
 
-```
-git clone <repo> viska
+<p align="center">
+  <img src="docs/screenshots/settings-general.png" alt="Viska general settings with language, hotkey, live-mode, and quality controls" width="48%">
+  <img src="docs/screenshots/settings-polishing.png" alt="Viska text-polishing settings with reusable writing templates and flow mode" width="48%">
+</p>
+
+> The current interface is Swedish. The screenshots are captured from the real v0.4
+> settings UI.
+
+## Three ways to work
+
+| Dictate anywhere | See text as you speak | Refine locally |
+| --- | --- | --- |
+| Hold **F9** to talk, then release. Viska inserts the text into email, chat, Word, browsers, and editors. | On supported GPUs, completed phrases are inserted during natural pauses while the current phrase stays in the status pill. | Select text and press **F8**, or enable Flow mode to polish a complete dictation before insertion. |
+
+## Highlights
+
+- **Push-to-talk or toggle.** Hold the hotkey like a walkie-talkie, or tap once to start
+  and once to stop.
+- **Application-aware profiles.** Give Outlook, Visual Studio Code, a terminal, or any
+  other app its own vocabulary, insertion method, language, and polishing task.
+- **Reusable writing templates.** Built-in email, commit-message, chat, formal, and concise
+  templates can be edited or replaced with your own.
+- **Voice formatting.** Spoken commands such as “new line” and “new paragraph” become
+  formatting instead of literal words.
+- **Clipboard-aware insertion.** Dictated text is excluded from Windows clipboard history
+  and cloud clipboard sync; the previous clipboard content is restored by default.
+- **Graceful fallback.** If polishing is unavailable or times out, Viska inserts the raw
+  transcript instead of losing the dictation.
+- **Portable distribution.** Release builds run without Python, installation, or
+  administrator access.
+
+## Quick start
+
+### Portable Windows build
+
+Download the zip from the [latest release](https://github.com/sockulags/viska/releases/latest),
+extract it, and run `Viska.exe`. On first launch, Viska detects the available hardware and
+offers the appropriate CPU or NVIDIA GPU setup. Models are downloaded on first use.
+
+### Run from source
+
+Requirements: Windows 10/11, Python 3.11 or newer, [uv](https://docs.astral.sh/uv/), and a
+microphone.
+
+```bash
+git clone https://github.com/sockulags/viska.git
 cd viska
-uv sync --extra gpu     # utan NVIDIA-GPU: uv sync
-uv run viska --check    # laddar ner modellen (~3 GB på GPU, ~0,5 GB på CPU)
-```
 
-`--check` ska sluta med `Enhet: cuda` (eller `cpu`). Starta sedan appen:
+# NVIDIA GPU
+uv sync --extra gpu
 
-```
+# CPU-only
+uv sync
+
+# Verify the selected device and download the speech model
+uv run viska --check
+
+# Start Viska
 uv run viska
 ```
 
-En mikrofonikon dyker upp i systemfältet och en grön remsa visar när
-Viska är redo.
+An NVIDIA GPU is recommended for sub-second transcription and live mode. CPU mode uses a
+smaller model and remains suitable for ordinary push-to-talk dictation. Local text
+polishing currently requires the GPU path.
 
-## Användning
+## Everyday controls
 
-Standardtangenten är **F9**:
+| Action | Default | Behaviour |
+| --- | --- | --- |
+| Dictate while held | Hold **F9** | Records while the key is down, then transcribes and inserts. |
+| Longer dictation | Tap **F9**, then tap again | Starts and stops without holding the key. |
+| Polish selected text | **F8** | Rewrites the current selection using the app's configured template. |
+| Choose a one-off tone | Double-tap **F8** | Opens a small menu without changing saved settings. |
+| Switch language | Tray menu | Explicitly switches between Swedish and English; app profiles never change language silently. |
 
-- **Håll inne** och prata — släpp när du är klar (walkie-talkie).
-- **Tryck kort** för att börja — prata så länge du vill — tryck igen för
-  att stoppa.
+The tray menu also exposes recent dictations, microphone selection, settings, update
+status, and application exit. History lives only in RAM unless disk persistence is
+explicitly enabled.
 
-Texten klistras in där markören är: i mejl, chattar, Word, webbläsare,
-kodredigerare. En remsa nertill på skärmen visar läget (spelar in /
-transkriberar) och korta pip markerar start och stopp.
+## How it works
 
-**Traymenyn** (högerklick på ikonen; röd under inspelning): Inställningar,
-historik (senaste dikteringarna, klicka för att kopiera — hålls i RAM som
-standard, se Integritet), växla svenska/engelska, byta mikrofon, avsluta.
-Finns en ny version på GitHub visas en hämta-rad överst. I den fristående
-.exe:n (se nedan) laddar hämta-raden ner, installerar och startar om Viska
-direkt — se Uppdatering. I utvecklingsläge öppnar den releases-sidan.
+```mermaid
+flowchart LR
+    A[Global hotkey] --> B[Microphone ring buffer]
+    B --> C[Local Whisper model]
+    C --> D{Flow or polish?}
+    D -- No --> E[App-specific insertion]
+    D -- Yes --> F[Local Qwen model]
+    F --> E
+    E --> G[Focused Windows app]
 
-**Inställningarna** har fyra flikar: *Allmänt* (språk, tangent med
-tryck-för-att-välja, livekänsla Lugn/Normal/Snabb, kvalitet i klartext,
-GPU-stöd), *Ordlista* (global ordlista + per app-profiler), *Polering*
-(poleringsmotor, global standard, mallbibliotek och flow) och *Avancerat*
-(råa tekniska värden för den som vill).
-
-**Ordlista:** skriv in namn och facktermer (t.ex. "Avanza, Smask") så
-stavar modellen dem rätt. **Per app-profiler:** ge en app egen extra
-ordlista, eget inskrivningssätt (t.ex. tecken för tecken i terminaler),
-egen poleringsuppgift (en mall eller egen text) och — om du uttryckligen
-väljer det — eget språk. Språk byts aldrig automatiskt.
-
-Profillistan visar programmens riktiga namn (t.ex. "Visual Studio Code"
-i stället för "code.exe") — config nycklas fortfarande på processnamnet,
-namnet är bara presentation. **Ny…** öppnar en väljare med körande
-program som har ett synligt fönster; markera ett i listan eller skriv
-processnamnet för hand om appen inte körs just nu.
-
-**Röstkommandon:** säg "ny rad" eller "nytt stycke" (engelska: "new
-line", "new paragraph") så skrivs radbrytning i stället för orden.
-Fraserna redigeras under `voice_commands` i config-filen — ta bort en
-rad för att stänga av den. Obs: radbrytningar i terminaler kan trigga
-"klistra in flera rader?"-varningen.
-
-**Starta med Windows:** kryssruta i Inställningar → Allmänt (eller
-`--install-autostart` från terminal).
-
-### Polering (AI)
-
-Markera text **var som helst** (även sånt du inte dikterat), tryck
-**F8**, och texten skrivs om av en lokal språkmodell: utfyllnadsord
-bort, grammatik rättad, innebörd bevarad.
-
-Vad poleringen ska *göra* styrs av en **poleringsuppgift**. Under
-Inställningar → Polering finns ett **mallbibliotek** med färdiga mallar
-(Mejl, Commit-text, Chattsvar, Formell text, Kortfattat) som går att
-redigera, ta bort eller komplettera med egna. Både den **globala
-standarden** och varje **app-profil** (Ordlista-fliken) pekar antingen på
-en mall eller på **Egen text** (egen fritext). Ändrar du en mall slår det
-igenom överallt där den används; en app-profil kan dessutom ärva den
-globala standarden. Så kan Outlook-profilen peka på mallen "Mejl" medan
-kodredigeraren pekar på "Commit-text" — och båda uppdateras samtidigt om
-du finslipar mallen. (Pekar en profil på en mall du senare raderar faller
-den tillbaka på den globala standarden.)
-
-**Välj ton för en enskild polering:** tryck **F8 två gånger snabbt** så
-dyker en liten meny upp vid pillen med *Appens standard* (förvald) följd av
-mallarna ur mallbiblioteket. Valet gäller bara den poleringen — inga
-inställningar ändras. Esc eller klick utanför stänger menyn.
-
-Originaltexten läggs i historiken innan den ersätts, så en polering du
-inte gillar går att ångra: öppna traymenyns historik och klicka på
-originalet för att kopiera tillbaka det. Poleringen följer aktivt språk —
-är engelska valt (traymenyn) skrivs texten om på och behåller engelska.
-
-Kräver GPU-läget samt en engångsnedladdning av modellen (~2,4 GB, Qwen3
-4B) via Inställningar → Polering. Allt körs lokalt; första poleringen
-efter start tar några sekunder extra (modellen laddas), därefter under
-en sekund. Obs: en liten modell kan göra små språkliga missar — läs
-igenom innan du skickar något viktigt. Modellen byts under
-`polish_model_repo`/`polish_model_file` i config.
-
-**Flow-läge** kör samma polering på *dikteringen* i stället för markerad
-text: talet skrivs inte in medan du pratar (pillen förhandsvisar det
-bara), och när du stoppar poleras hela transkriptet automatiskt och
-skrivs in på en gång — precis som Wispr Flow. Slå på det globalt under
-Inställningar → Polering eller per app i Ordlista-profilen (kryssrutan visas
-när poleringen är nedladdad); en app-profil kan kombinera flow med sin egen
-poleringsuppgift, t.ex. mallen "Mejl". Skulle poleringen vara otillgänglig, krångla eller
-ta för lång tid skrivs råtexten in precis som vanligt — dikteringen går
-aldrig förlorad. Både rå- och den polerade versionen hamnar i historiken
-(råtexten går att hämta i traymenyn).
-
-### Liveläge
-
-Med GPU skrivs texten in **medan du pratar**: varje fras blir färdig när
-du gör en kort paus och skrivs in direkt, medan frasen du håller på med
-förhandsvisas i pillen nertill (med levande ljudnivåmätare). Slutar
-frasen med punkt/frågetecken räcker en kortare paus — inskrivningen
-följer meningsrytmen. Whisper är ingen streamingmodell, så redan
-inskriven text kan inte ändras i efterhand — det är därför bara färdiga
-fraser skrivs in, aldrig den pågående. Känslan justeras i Inställningar
-(Livekänsla: Lugn/Normal/Snabb); stäng av liveläget helt där om du
-hellre får hela dikteringen på en gång.
-
-## Konfiguration
-
-`%APPDATA%\viska\config.json` (skapas vid första start; starta om Viska
-efter ändringar):
-
-| Nyckel | Standard | Betydelse |
-|---|---|---|
-| `hotkey` | `"f9"` | Dikteringstangent, t.ex. `"f8"`, `"scroll lock"`, `"ctrl+alt+d"` |
-| `hold_threshold_s` | `0.35` | Kortare tryck = växla, längre = håll-och-prata |
-| `model` | `"auto"` | `auto` = kb-whisper-large på GPU, kb-whisper-small på CPU |
-| `model_en` | `"large-v3-turbo"` | Modell för engelska (laddas vid språkbyte) |
-| `language` | `"sv"` | Aktivt språk; växlas enklast i traymenyn |
-| `device` | `"auto"` | `auto`/`cuda`/`cpu` |
-| `compute_type` | `null` | `null` = float16 på GPU, int8 på CPU. `"int8_float16"` halverar VRAM på GPU |
-| `beam_size` | `null` | `null` = 5 på GPU, 2 på CPU |
-| `inject_mode` | `"paste"` | `paste` (klippbord+Ctrl+V) eller `type` (tecken för tecken) |
-| `restore_clipboard` | `true` | Återställ gamla klippbordet efter inklistring |
-| `append_space` | `true` | Mellanslag efter varje diktering |
-| `max_recording_s` | `300` | Säkerhetsstopp för inspelning |
-| `live` | `"auto"` | Liveläge: `auto` = på med GPU, av på CPU. Även `true`/`false` |
-| `live_interval_s` | `0.7` | Hur ofta ljudet omtranskriberas i liveläget |
-| `live_commit_silence_s` | `0.6` | Paus som gör en fras färdig (skrivs in, ändras aldrig) |
-| `input_device` | `null` | `null` = standardmikrofon, annars index från `--list-devices` |
-| `keep_mic_open` | `true` | Öppen mikrofonström = ingen klippt första stavelse |
-| `sounds` | `true` | Pip vid start/stopp |
-| `history_size` | `20` | Antal dikteringar i traymenyns historik |
-| `history_persist` | `false` | Spara historiken till `history.json` (se Integritet) i stället för bara RAM |
-| `polish_prompt` | `""` | Global poleringsuppgift som "Egen text"; används när `polish_template` är tom |
-| `polish_template` | `""` | Namn på mallen i `polish_templates` som global standard pekar på (tom = Egen text) |
-| `polish_templates` | *(5 mallar)* | Mallbiblioteket (`{namn, prompt}`); hanteras enklast i Inställningar → Polering |
-| `flow` | `false` | Flow-läge globalt: polera hela dikteringen automatiskt före inskrivning |
-
-## Autostart
-
-```
-uv run viska --install-autostart
+    H[App profile] -. vocabulary / language / template .-> C
+    H -. insertion mode .-> E
 ```
 
-Skapar en genväg i Startup-mappen som kör Viska tyst (pythonw, inget
-konsolfönster) vid inloggning. Ta bort med `--uninstall-autostart`.
+Viska keeps the microphone open by default to avoid clipping the first syllable, but only
+retains a rolling buffer of roughly half a second in memory. No recording is saved. Finished
+text is inserted either through a protected clipboard flow or by typing Unicode characters
+one by one for applications that do not accept paste.
 
-## Engelska
+## Local text polishing
 
-KB-Whisper är enbart tränad på svenska. Växla till engelska i traymenyn —
-då laddas en separat flerspråkig modell (`model_en`) första gången, och
-dikteringen körs mot den tills du växlar tillbaka.
+The built-in polishing engine runs a quantized Qwen3 4B model through `llama.cpp`. It can:
 
-## Integritet
+- remove filler words while preserving meaning
+- turn rough speech into an email or chat response
+- produce concise imperative commit messages
+- apply a reusable global or per-application writing template
+- polish each complete dictation automatically in Flow mode
 
-- Ljud och text lämnar aldrig datorn. Nätverk används bara första gången
-  en modell laddas ner från Hugging Face.
-- Dikteringar som klistras in via klippbordet märks med Windows
-  undantagsformat så att de **inte** hamnar i Win+V-historiken och
-  **inte** synkas via molnklippbordet.
-- Med `keep_mic_open` lyssnar mikrofonströmmen bara in i en ringbuffert
-  på ~0,5 sekunder i RAM som ständigt skrivs över; inget sparas.
-- **Historiken hålls i RAM som standard** och försvinner vid omstart.
-  Kryssrutan "Spara historik på disk" i Inställningar → Avancerat är ett
-  uttryckligt val (av som standard): på skrivs den till
-  `%APPDATA%\viska\history.json` vid varje ändring och läses in igen vid
-  start; stängs den av raderas filen om den finns.
+The default model was selected through a local 28-case Swedish evaluation covering noisy
+speech, factual preservation, email, commit text, mixed-language input, and long dictation.
+The table below reports that project evaluation; it is not an external benchmark.
 
-## Uppdatering
+| Model | Overall | Factual preservation | Median latency |
+| --- | ---: | ---: | ---: |
+| **Qwen3 4B Instruct Q4** | **8.2 / 10** | **9.2 / 10** | **0.49 s** |
+| qwen3.5 9B via Ollama | 7.1 / 10 | 8.2 / 10 | 3.06 s |
+| Qwen3 1.7B Q4 | 5.0 / 10 | 8.8 / 10 | 0.27 s |
+| EuroLLM 1.7B Q4 | 3.1 / 10 | 7.2 / 10 | 0.19 s |
 
-Vid start kollar Viska GitHub-releases efter en nyare version (bara ett
-versionsnummer hämtas; ingen data skickas — stäng av under Inställningar →
-Avancerat). Finns en nyare visas **Hämta version X** överst i traymenyn.
+Read the [evaluation notes and methodology](docs/eval-polering.md). Important text should
+still be reviewed before sending; small local models can make language mistakes.
 
-I den fristående .exe:n gör hämta-raden hela jobbet: efter en bekräftelse
-laddas release-zippen ner till `%TEMP%`, packas upp och valideras, varefter
-Viska startar om på den nya versionen. Allt före omstarten är rent additivt
-(temp-filer) — misslyckas något (nätverksfel, ofullständig nedladdning) rörs
-den installerade versionen aldrig, och releases-sidan öppnas i webbläsaren
-i stället. Nedladdningen sker i bakgrunden; du kan diktera under tiden.
+## Privacy model
 
-Är repot privat krävs en **GitHub-token** (personlig access-token med
-läsrätt) i Inställningar → Avancerat → *GitHub-token*. Utan giltig token
-faller uppdateringen tillbaka på att öppna releases-sidan för manuell
-hämtning. I utvecklingsläge (`uv run viska`) öppnas alltid releases-sidan.
+| Data | Default behaviour |
+| --- | --- |
+| Audio | Processed in memory and never saved. |
+| Speech recognition | Runs locally with faster-whisper. |
+| Text polishing | Runs locally with llama.cpp, or optionally against a user-configured local Ollama instance. |
+| Dictation history | RAM only; disk persistence is opt-in. |
+| Clipboard | Previous content is restored; inserted text is marked to avoid Windows history and cloud sync. |
+| Network | Used for first-time model downloads and optional GitHub release checks. No telemetry. |
 
-## Felsökning
+After the required models are present, ordinary dictation and built-in polishing work
+offline. Automatic update checks can be disabled in advanced settings.
 
-- **Loggen** finns i `%APPDATA%\viska\viska.log`.
-- **Uppdateringen startade inte om**: uppdaterarens egen logg finns i
-  `%TEMP%\viska-update.log` (robocopy-utfall m.m.). Vid fel öppnas
-  releases-sidan så du kan hämta zippen manuellt.
-- **"Modellen kunde inte laddas" med GPU**: kontrollera att `uv sync
-  --extra gpu` kördes (cuBLAS/cuDNN-paketen krävs för CUDA). Viska faller
-  automatiskt tillbaka på CPU.
-- **Texten skrivs inte in i admin-fönster**: Windows (UIPI) blockerar
-  inmatning från vanliga program till upphöjda fönster. Kör Viska som
-  administratör om du behöver diktera där.
-- **Ctrl+V fungerar inte i vissa terminaler/TUI-program**: sätt
-  `inject_mode` till `"type"`.
-- **Tangenten reagerar inte**: något annat program äger genvägen
-  (RegisterHotKey) — en traynotis och en rad i loggen talar om vilken
-  tangent det gäller. Appen startar ändå; byt tangenten i Inställningar.
-- **Fel mikrofon efter dockning/headsetbyte**: traymenyn → "Byt till ny
-  standardmikrofon".
+## Configuration
 
-## Fristående .exe för andra datorer
+Most settings are available through the four-tab settings window:
 
-För att köra Viska på en dator utan Python/uv (t.ex. jobbdatorn):
+- **General:** language, hotkey, live feel, quality, sounds, and Windows startup
+- **Vocabulary:** global terms and application-specific profiles
+- **Polishing:** engine, global template, template library, Flow mode, and profile overview
+- **Advanced:** model IDs, compute mode, insertion behaviour, privacy controls, and updates
 
-```
+The configuration file is `%APPDATA%\viska\config.json`. It is created on first launch.
+Useful defaults include:
+
+| Key | Default | Purpose |
+| --- | --- | --- |
+| `hotkey` | `f9` | Dictation key or key combination |
+| `language` | `sv` | Active speech language |
+| `model` | `auto` | Large KB-Whisper on GPU, small on CPU |
+| `live` | `auto` | Enabled on GPU, disabled on CPU |
+| `inject_mode` | `paste` | Protected clipboard insertion or character-by-character typing |
+| `history_persist` | `false` | Keep recent dictations in memory only |
+| `flow` | `false` | Polish full dictations before insertion |
+
+## Build a portable release
+
+```bash
 uv pip install pyinstaller
-uv run python build.py          # universalpaket (~100 MB zip)
-uv run python build.py --gpu    # buntar även CUDA-biblioteken (~+1,3 GB)
+uv run python build.py          # universal package
+uv run python build.py --gpu    # also bundles CUDA libraries for offline GPU setup
 ```
 
-Kopiera zippen, packa upp var som helst, kör `Viska.exe` — ingen
-installation, inga adminrättigheter.
+The universal build can download GPU support later and otherwise falls back to CPU. The
+bundled GPU build is intended for machines that must be prepared without network access.
 
-**Första starten** känner Viska av datorns hårdvara:
+## Diagnostics
 
-- Finns en NVIDIA-GPU erbjuds valet att ladda ner CUDA-biblioteken
-  (~1,4 GB, hämtas från PyPI till `%APPDATA%\viska`) för GPU-läge med
-  bästa modellen och livetranskribering — eller att köra CPU-läge direkt.
-- Har datorn redan komplett CUDA (toolkit + cuDNN) används det utan
-  någon nedladdning.
-- Utan NVIDIA-GPU körs CPU-läget utan frågor.
-
-Valet går att ändra när som helst: Inställningar → GPU-stöd (ladda
-ner/ta bort), eller `Viska.exe --setup-gpu` / `--remove-gpu`.
-Whisper-modellen laddas ner första gången appen används (kb-whisper-small
-~0,5 GB på CPU, kb-whisper-large ~3 GB på GPU). Autostart:
-`Viska.exe --install-autostart`.
-
-`--gpu`-bygget behövs alltså bara för datorer som ska köra GPU-läge helt
-offline; annars räcker universalpaketet.
-
-## Verktyg för test
-
+```bash
+uv run viska --list-devices
+uv run viska --transcribe path\to\audio.wav
+uv run viska --check
 ```
-uv run viska --list-devices          # lista ljudenheter
-uv run viska --transcribe fil.wav    # transkribera en fil (även .ogg/.mp3)
-```
+
+The application log is written to `%APPDATA%\viska\viska.log`. See the
+[v0.4 release notes](docs/release-notes-v0.4.0.md) for the current feature set.
+
+## Project status
+
+Viska is released and used as a Windows-first Swedish dictation tool. The main limitations
+are explicit: the UI is currently Swedish, live transcription benefits substantially from
+an NVIDIA GPU, and local polishing requires the GPU setup. CPU dictation remains supported.
