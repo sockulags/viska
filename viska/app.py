@@ -147,14 +147,15 @@ class App:
         # instansiera Polisher samtidigt.
         self._polisher_lock = threading.Lock()
         self._polishing = threading.Event()
-        # Ollama-nåbarhet cachas: flow-beslutet vid start (live eller inte)
-        # behöver veta om poleringen är tillgänglig, men ett synkront HTTP-
-        # anrop på hotkey-tråden skulle fördröja "Spelar in" upp till 2 s när
-        # Ollama är nere. Cachen läses där och uppdateras i bakgrunden.
-        self._ollama_reachable = False
-        if cfg["polish_backend"] == "ollama":
+        # Fjärrbackendens nåbarhet cachas: flow-beslutet vid start (live
+        # eller inte) behöver veta om poleringen är tillgänglig, men ett
+        # synkront HTTP-anrop på hotkey-tråden skulle fördröja "Spelar in"
+        # upp till 2 s när tjänsten är nere. Cachen läses där och uppdateras
+        # i bakgrunden.
+        self._remote_reachable = False
+        if llm.is_remote(cfg):
             threading.Thread(
-                target=self._refresh_ollama_reachable, daemon=True
+                target=self._refresh_remote_reachable, daemon=True
             ).start()
         self.polish_key: ActionKey | None = None
         try:
@@ -492,14 +493,14 @@ class App:
             # med liveinskrivning i stället — annars skulle en kvarglömd flow-
             # flagga (t.ex. efter "Ta bort poleringen") tyst stänga av live och
             # falla tillbaka på råtext varje gång. Tillgänglighetskollen är
-            # icke-blockerande (Ollama läses ur cachen) så hotkey-tråden aldrig
+            # icke-blockerande (cachen läses) så hotkey-tråden aldrig
             # hänger på nätverket; vanlig diktering utan flow kortsluter och
             # betalar inget.
             flow_flag = bool(profile.get("flow", self.cfg["flow"]))
-            if flow_flag and self.cfg["polish_backend"] == "ollama":
+            if flow_flag and llm.is_remote(self.cfg):
                 # Håll cachen färsk till nästa diktering utan att blockera nu.
                 threading.Thread(
-                    target=self._refresh_ollama_reachable, daemon=True
+                    target=self._refresh_remote_reachable, daemon=True
                 ).start()
             self._session_flow = flow_flag and self._flow_polish_available()
             # Poleringsuppgift via den gemensamma upplösningen (mall/fritext →
@@ -798,8 +799,8 @@ class App:
 
         def work():
             try:
-                if self.cfg["polish_backend"] == "ollama":
-                    result["text"] = llm.polish_ollama(self.cfg, text, style, lang)
+                if llm.is_remote(self.cfg):
+                    result["text"] = llm.polish_remote(self.cfg, text, style, lang)
                 else:
                     polisher = self._get_polisher()
                     polisher.ensure_loaded()
@@ -829,7 +830,7 @@ class App:
         """Börjar ladda in poleringsmodellen i bakgrunden när en flow-session
         startar, så att den är varm när dikteringen stoppas. Idempotent –
         ensure_loaded returnerar direkt om modellen redan är laddad."""
-        if self.cfg["polish_backend"] == "ollama" or not llm.installed(self.cfg):
+        if llm.is_remote(self.cfg) or not llm.installed(self.cfg):
             return
 
         def work():
@@ -845,18 +846,18 @@ class App:
     def _flow_polish_available(self) -> bool:
         """Icke-blockerande koll vid start om poleringen kan användas för flow
         (annars körs sessionen som vanlig diktering med liveinskrivning). För
-        Ollama läses den bakgrundsuppdaterade cachen — ett synkront HTTP-anrop
-        på hotkey-tråden skulle fördröja "Spelar in". builtin är en billig
-        filkoll."""
-        if self.cfg["polish_backend"] == "ollama":
-            return self._ollama_reachable
+        fjärrbackender läses den bakgrundsuppdaterade cachen — ett synkront
+        HTTP-anrop på hotkey-tråden skulle fördröja "Spelar in". builtin är en
+        billig filkoll."""
+        if llm.is_remote(self.cfg):
+            return self._remote_reachable
         return llm.installed(self.cfg)
 
-    def _refresh_ollama_reachable(self) -> None:
+    def _refresh_remote_reachable(self) -> None:
         try:
-            self._ollama_reachable = llm.ollama_reachable(self.cfg)
+            self._remote_reachable = llm.remote_reachable(self.cfg)
         except Exception:
-            self._ollama_reachable = False
+            self._remote_reachable = False
 
     # -- Inställningar ---------------------------------------------------------------
 
@@ -868,7 +869,7 @@ class App:
         if self._settings is not None and self._settings.win.winfo_exists():
             self._settings.win.lift()
             return
-        # llm.installed() gör för Ollama-backend en synkron nåbarhetskoll
+        # llm.installed() gör för fjärrbackender en synkron nåbarhetskoll
         # (2 s HTTP-timeout) på huvudtråden. Kör den EN gång och återanvänd
         # svaret i både poleringspanelen och polish_ready – annars gjordes
         # kollen två gånger i rad och hela GUI:t kunde frysa ~4 s vid varje
@@ -887,14 +888,15 @@ class App:
         if self._llm_busy.is_set():
             return {"state": "Åtgärd pågår…", "kind": "warn", "action": None}
         key = (self.cfg["polish_hotkey"] or "f8").upper()
-        if self.cfg["polish_backend"] == "ollama":
+        if llm.is_remote(self.cfg):
             ok = polish_ready  # redan nåbarhetskollat i _open_settings
-            model = self.cfg["polish_ollama_model"]
+            model = llm.remote_model(self.cfg)
+            service = llm.remote_label(self.cfg)
             return {
                 "state": (
-                    f"via Ollama ({model}) – markera text och tryck {key}"
+                    f"via {service} ({model}) – markera text och tryck {key}"
                     if ok
-                    else f"via Ollama ({model}) – Ollama svarar inte"
+                    else f"via {service} ({model}) – tjänsten svarar inte"
                 ),
                 "kind": "ok" if ok else "warn",
                 "action": None,
@@ -1159,9 +1161,9 @@ class App:
         # appstart med builtin-backend) och körs som vanlig liveinskrivning
         # trots att Ollama svarar; först nästa diktering hann annars uppdatera
         # cachen. Sker i bakgrunden (2 s HTTP-timeout) så Spara aldrig blockeras.
-        if self.cfg["polish_backend"] == "ollama":
+        if llm.is_remote(self.cfg):
             threading.Thread(
-                target=self._refresh_ollama_reachable, daemon=True
+                target=self._refresh_remote_reachable, daemon=True
             ).start()
         if token_changed and self.cfg["check_updates"] and self.update_release is None:
             update.check_async(
@@ -1357,9 +1359,11 @@ class App:
                 self.overlay.show("(ingen markering)", GRAY, auto_hide_ms=1500)
                 return
             try:
-                if self.cfg["polish_backend"] == "ollama":
-                    self.overlay.show("Polerar via Ollama…", BLUE)
-                    result = llm.polish_ollama(self.cfg, text, style, self.language)
+                if llm.is_remote(self.cfg):
+                    self.overlay.show(
+                        f"Polerar via {llm.remote_label(self.cfg)}…", BLUE
+                    )
+                    result = llm.polish_remote(self.cfg, text, style, self.language)
                 else:
                     if self._polisher is None:
                         self.overlay.show("Laddar poleringsmodellen…", GRAY)

@@ -478,9 +478,23 @@ class SettingsWindow:
         )
         adv_combo(
             "Poleringsbackend", "polish_backend", cfg["polish_backend"],
-            ["builtin", "ollama"],
+            ["builtin", "ollama", "http"],
         )
         adv_entry("Ollama-modell", "polish_ollama_model", cfg["polish_ollama_model"])
+        adv_entry("Poleringstjänstens adress", "polish_http_url", cfg["polish_http_url"])
+        adv_entry("Modell i tjänsten", "polish_http_model", cfg["polish_http_model"])
+        self._http_token = tk.StringVar(value=str(cfg.get("polish_http_token", "") or ""))
+        holder = self._row(
+            advanced, "Nyckel till tjänsten", hint="Tom = ingen Authorization-header"
+        )
+        ttk.Entry(
+            holder, textvariable=self._http_token, width=_FIELD_W, show="•"
+        ).pack()
+        self._hint(
+            advanced,
+            "Backend \"http\" skickar texten till adressen ovan — den lämnar\n"
+            "alltså datorn. Avsedd för maskiner utan lokal poleringsmodell.",
+        )
         self._restore = tk.BooleanVar(value=bool(cfg["restore_clipboard"]))
         self._append = tk.BooleanVar(value=bool(cfg["append_space"]))
         self._updates = tk.BooleanVar(value=bool(cfg["check_updates"]))
@@ -1184,10 +1198,20 @@ class SettingsWindow:
         )
         changes["polish_hotkey"] = self._adv["polish_hotkey"].get().strip() or "f8"
         backend = self._adv["polish_backend"].get().strip()
-        changes["polish_backend"] = backend if backend in ("builtin", "ollama") else "builtin"
+        changes["polish_backend"] = (
+            backend if backend in ("builtin", "ollama", "http") else "builtin"
+        )
         changes["polish_ollama_model"] = (
             self._adv["polish_ollama_model"].get().strip() or "qwen3.5:9b"
         )
+        changes["polish_http_url"] = (
+            self._adv["polish_http_url"].get().strip()
+            or "http://127.0.0.1:8756/v1/chat/completions"
+        )
+        changes["polish_http_model"] = (
+            self._adv["polish_http_model"].get().strip() or "gpt-5.4-mini"
+        )
+        changes["polish_http_token"] = self._http_token.get().strip()
         return changes
 
     def _save(self) -> None:

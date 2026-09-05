@@ -158,9 +158,29 @@ DEFAULTS = {
     # "builtin" = inbyggd motor (llama.cpp, laddas ner via Inställningar).
     # "ollama" = återanvänd en körande Ollama och dess modeller — inget
     # extra laddas ner.
+    # "http" = valfri OpenAI-kompatibel endpoint. Tänkt för datorer som inte
+    # kan köra en poleringsmodell lokalt: peka den på en riktig API-tjänst,
+    # eller på shimmen i tools/polish_server.py som håller en Codex-process
+    # varm. OBS: med den här backenden lämnar den polerade texten datorn.
     "polish_backend": "builtin",
     "polish_ollama_model": "qwen3.5:9b",
     "polish_ollama_url": "http://localhost:11434",
+    # http-backenden. Adressen är hela chat/completions-vägen; /health på
+    # samma värd används för nåbarhetskollen.
+    "polish_http_url": "http://127.0.0.1:8756/v1/chat/completions",
+    "polish_http_model": "gpt-5.4-mini",
+    # Skickas som "Authorization: Bearer …" när den är ifylld. Shimmen kan
+    # kräva den så att inget annat program på datorn kan använda tjänsten.
+    "polish_http_token": "",
+    "polish_http_timeout_s": 60,
+    # http-backenden. Adressen är hela chat/completions-vägen; /health på
+    # samma värd används för nåbarhetskollen.
+    "polish_http_url": "http://127.0.0.1:8756/v1/chat/completions",
+    "polish_http_model": "gpt-5.4-mini",
+    # Skickas som "Authorization: Bearer …" när den är ifylld. Shimmen kan
+    # kräva den så att inget annat program på datorn kan använda tjänsten.
+    "polish_http_token": "",
+    "polish_http_timeout_s": 60,
     "polish_model_repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
     # Filnamn i %APPDATA%\viska\llm — eller en absolut sökväg till en egen
     # GGUF (t.ex. en Ollama-blob).

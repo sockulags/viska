@@ -11,6 +11,7 @@ import logging
 import os
 import shutil
 import threading
+import urllib.error
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -73,19 +74,55 @@ def runtime_installed() -> bool:
     )
 
 
+# Backends som inte kör i vår egen process. De delar inte VRAM med Whisper,
+# de kan inte förladdas, och "installerad" betyder för dem "svarar den?".
+REMOTE_BACKENDS = ("ollama", "http")
+
+
+def is_remote(cfg: dict) -> bool:
+    return cfg["polish_backend"] in REMOTE_BACKENDS
+
+
 def installed(cfg: dict) -> bool:
+    if is_remote(cfg):
+        return remote_reachable(cfg)
+    return model_installed(cfg) and runtime_installed()
+
+
+def remote_reachable(cfg: dict) -> bool:
     if cfg["polish_backend"] == "ollama":
         return ollama_reachable(cfg)
-    return model_installed(cfg) and runtime_installed()
+    if cfg["polish_backend"] == "http":
+        return http_reachable(cfg)
+    return False
+
+
+def polish_remote(cfg: dict, text: str, style: str = "", lang: str = "sv") -> str:
+    if cfg["polish_backend"] == "ollama":
+        return polish_ollama(cfg, text, style, lang)
+    return polish_http(cfg, text, style, lang)
+
+
+def remote_label(cfg: dict) -> str:
+    """Kort namn på tjänsten för statustexter i Inställningar och overlayn."""
+    if cfg["polish_backend"] == "ollama":
+        return "Ollama"
+    return "molntjänsten"
+
+
+def remote_model(cfg: dict) -> str:
+    if cfg["polish_backend"] == "ollama":
+        return cfg["polish_ollama_model"]
+    return cfg["polish_http_model"]
 
 
 def polish_shares_gpu(cfg: dict) -> bool:
     """Delar poleringen samma lokala VRAM-budget som Whisper just nu?
 
     Bara den inbyggda motorn gör det säkert – den laddas i samma process
-    på samma GPU (Qwen3-4B, ~2,4 GB). Ollama-backendens modell kan vara
-    valfri storlek och köra på en annan maskin (polish_ollama_url), så
-    den räknas inte in i Whispers kvantiseringsval."""
+    på samma GPU (Qwen3-4B, ~2,4 GB). Fjärrbackendernas modeller kan vara
+    hur stora som helst och köra på en annan maskin (eller i molnet), så de
+    räknas inte in i Whispers kvantiseringsval."""
     return (
         cfg["polish_backend"] == "builtin"
         and model_installed(cfg)
@@ -152,6 +189,91 @@ def _strip_thinking(text: str) -> str:
     import re
 
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+
+# -- http-backend: valfri OpenAI-kompatibel endpoint ---------------------------
+#
+# Tänkt för maskiner som inte kan köra en lokal poleringsmodell alls. Viska
+# talar bara OpenAI-formatets /chat/completions och vet ingenting om vad som
+# står bakom: en riktig API-nyckel, eller shimmen i tools/polish_server.py som
+# håller en Codex-process varm och kör prenumerationen. Byts tjänsten ut rörs
+# aldrig appen.
+#
+# Ingen text lämnar datorn förrän den här backenden uttryckligen väljs.
+
+
+def _http_origin(url: str) -> str:
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
+def http_reachable(cfg: dict) -> bool:
+    """Svarar tjänsten? Kort tidsgräns: kollen görs bland annat när
+    Inställningar öppnas och får aldrig frysa GUI:t."""
+    try:
+        req = urllib.request.Request(
+            f"{_http_origin(cfg['polish_http_url'])}/health",
+            headers=_http_headers(cfg),
+        )
+        with urllib.request.urlopen(req, timeout=2):
+            return True
+    except Exception:
+        return False
+
+
+def _http_headers(cfg: dict) -> dict:
+    headers = {"Content-Type": "application/json"}
+    token = (cfg.get("polish_http_token") or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def polish_http(cfg: dict, text: str, style: str = "", lang: str = "sv") -> str:
+    import json
+
+    body = {
+        "model": cfg["polish_http_model"],
+        "messages": [
+            {"role": "system", "content": _system_prompt(style, lang)},
+            {"role": "user", "content": text},
+        ],
+        "temperature": 0,
+        "stream": False,
+    }
+    req = urllib.request.Request(
+        cfg["polish_http_url"],
+        data=json.dumps(body).encode(),
+        headers=_http_headers(cfg),
+    )
+    try:
+        with urllib.request.urlopen(
+            req, timeout=float(cfg["polish_http_timeout_s"])
+        ) as r:
+            out = json.load(r)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(_http_error(e)) from e
+    choice = (out.get("choices") or [{}])[0]
+    result = _strip_thinking(choice.get("message", {}).get("content", "")).strip()
+    return result or text
+
+
+def _http_error(e: "urllib.error.HTTPError") -> str:
+    """Serverns egen förklaring om den ger en – kvotstopp och nertid ska gå
+    att läsa ur loggen utan att gissa."""
+    detail = ""
+    try:
+        import json
+
+        payload = json.loads(e.read().decode(errors="replace"))
+        detail = str(payload.get("error", {}).get("message", "")).strip()
+    except Exception:
+        pass
+    if e.code == 429:
+        return f"poleringstjänstens kvot är slut: {detail or 'HTTP 429'}"
+    return f"poleringstjänsten svarade HTTP {e.code}: {detail or 'inget svar'}"
 
 
 def download_size_gb(cfg: dict) -> float:

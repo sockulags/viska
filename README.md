@@ -161,6 +161,33 @@ The table below reports that project evaluation; it is not an external benchmark
 Read the [evaluation notes and methodology](docs/eval-polering.md). Important text should
 still be reviewed before sending; small local models can make language mistakes.
 
+## Polishing without a local GPU
+
+Machines that cannot run a local model at all can send the polishing step to a remote
+service. Set `polish_backend` to `http` in advanced settings and point `polish_http_url` at
+any OpenAI-compatible `/v1/chat/completions` endpoint. Viska knows nothing about what
+answers: an API key, a company gateway, or the small server in
+[`tools/polish_server.py`](tools/polish_server.py), which keeps a Codex process warm and
+runs each rewrite through it.
+
+```bash
+uv run tools/polish_server.py --model gpt-5.4-mini --effort none
+```
+
+The server binds to `127.0.0.1:8756`, exposes `/health` and `/v1/chat/completions`, and can
+require a bearer token with `--token`. It overrides the user's own Codex configuration —
+model, reasoning effort, sandbox and instructions are all set explicitly — so a coding
+setup with large developer instructions does not end up prepended to every dictation. The
+sandbox is read-only and approvals are denied: the model gets no tools, only text in and
+text out. Each request runs in its own ephemeral thread, so one dictation never carries
+the previous one as context. Quota exhaustion is reported as HTTP 429 with the provider's
+own message, which reaches the Viska log instead of disappearing into a silent fallback.
+
+Run it with `--fake` to test the wiring without spending anything.
+
+**This backend sends the dictated text off the machine.** Everything else in Viska stays
+local; this is the one setting that changes that, and it is off by default.
+
 ## Privacy model
 
 | Data | Default behaviour |
@@ -168,7 +195,7 @@ still be reviewed before sending; small local models can make language mistakes.
 | Microphone | Opened on the hotkey and closed again once you stop dictating (configurable). |
 | Audio | Processed in memory and never saved. |
 | Speech recognition | Runs locally with faster-whisper. |
-| Text polishing | Runs locally with llama.cpp, or optionally against a user-configured local Ollama instance. |
+| Text polishing | Runs locally with llama.cpp, or optionally against a user-configured Ollama instance or remote endpoint (`polish_backend`). |
 | Dictation history | RAM only; disk persistence is opt-in. |
 | Clipboard | Previous content is restored; inserted text is marked to avoid Windows history and cloud sync. |
 | Network | Used for first-time model downloads and optional GitHub release checks. No telemetry. |
@@ -200,6 +227,7 @@ Useful defaults include:
 | `replacements` | `{}` | Heard phrase to written text, applied after transcription |
 | `history_persist` | `false` | Keep recent dictations in memory only |
 | `flow` | `false` | Polish full dictations before insertion |
+| `polish_backend` | `builtin` | `builtin`, `ollama`, or `http` (remote endpoint) |
 
 ## Tests
 
