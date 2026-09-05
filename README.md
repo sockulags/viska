@@ -171,7 +171,7 @@ answers: an API key, a company gateway, or the small server in
 runs each rewrite through it.
 
 ```bash
-uv run tools/polish_server.py --model gpt-5.4-mini --effort none
+uv run tools/polish_server.py --model gpt-5.6-luna --effort none
 ```
 
 The server binds to `127.0.0.1:8756`, exposes `/health` and `/v1/chat/completions`, and can

@@ -1209,7 +1209,7 @@ class SettingsWindow:
             or "http://127.0.0.1:8756/v1/chat/completions"
         )
         changes["polish_http_model"] = (
-            self._adv["polish_http_model"].get().strip() or "gpt-5.4-mini"
+            self._adv["polish_http_model"].get().strip() or "gpt-5.6-luna"
         )
         changes["polish_http_token"] = self._http_token.get().strip()
         return changes

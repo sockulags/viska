@@ -287,7 +287,7 @@ def main() -> int:
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8756)
-    parser.add_argument("--model", default="gpt-5.4-mini")
+    parser.add_argument("--model", default="gpt-5.6-luna")
     parser.add_argument(
         "--effort",
         default="none",

@@ -168,15 +168,7 @@ DEFAULTS = {
     # http-backenden. Adressen är hela chat/completions-vägen; /health på
     # samma värd används för nåbarhetskollen.
     "polish_http_url": "http://127.0.0.1:8756/v1/chat/completions",
-    "polish_http_model": "gpt-5.4-mini",
-    # Skickas som "Authorization: Bearer …" när den är ifylld. Shimmen kan
-    # kräva den så att inget annat program på datorn kan använda tjänsten.
-    "polish_http_token": "",
-    "polish_http_timeout_s": 60,
-    # http-backenden. Adressen är hela chat/completions-vägen; /health på
-    # samma värd används för nåbarhetskollen.
-    "polish_http_url": "http://127.0.0.1:8756/v1/chat/completions",
-    "polish_http_model": "gpt-5.4-mini",
+    "polish_http_model": "gpt-5.6-luna",
     # Skickas som "Authorization: Bearer …" när den är ifylld. Shimmen kan
     # kräva den så att inget annat program på datorn kan använda tjänsten.
     "polish_http_token": "",
