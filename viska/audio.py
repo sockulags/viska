@@ -1,9 +1,18 @@
 """Mikrofoninspelning: 16 kHz mono float32, formatet Whisper vill ha.
 
-Strömmen hålls normalt öppen hela tiden och skriver till en liten
-ringbuffert i RAM. När en inspelning startar tas ~0,25 s ur ringbufferten
-med som förstart — att öppna en WASAPI-ström tar 100–300 ms och skulle
-annars klippa första stavelsen. Ljudet lämnar aldrig processen.
+Tre lägen (config: mic_mode) styr när strömmen är öppen, för Windows visar
+mikrofonikonen i aktivitetsfältet så länge den är det:
+
+- "on_demand" (förval): strömmen öppnas vid dikteringen och stängs en stund
+  efter den sista. Ikonen syns bara när Viska faktiskt lyssnar. Fördröjningen
+  (mic_idle_close_s) gör att diktering på diktering ändå slipper
+  öppningskostnaden och behåller förstarten.
+- "always": strömmen står alltid öppen mot en liten ringbuffert i RAM.
+  ~0,25 s förstart tas därifrån vid varje inspelning — att öppna en
+  WASAPI-ström tar 100–300 ms och skulle annars klippa första stavelsen.
+- "closed": strömmen stängs direkt efter varje diktering.
+
+Ljudet lämnar aldrig processen.
 
 PortAudio fryser enhetslistan vid init och följer inte Windows byte av
 standardmikrofon. En vakthund upptäcker att callbacken tystnat (enheten
@@ -25,10 +34,24 @@ SAMPLE_RATE = 16000
 BLOCK = 1600  # 100 ms per callback-block
 
 
+ALWAYS = "always"
+ON_DEMAND = "on_demand"
+CLOSED = "closed"
+MODES = (ALWAYS, ON_DEMAND, CLOSED)
+
+
 class Recorder:
-    def __init__(self, input_device=None, keep_open=True, preroll_s=0.25):
+    def __init__(
+        self,
+        input_device=None,
+        mode: str = ON_DEMAND,
+        preroll_s: float = 0.25,
+        idle_close_s: float = 20.0,
+    ):
         self._device = input_device
-        self._keep_open = keep_open
+        self._mode = mode if mode in MODES else ON_DEMAND
+        self._idle_close_s = max(0.0, float(idle_close_s))
+        self._idle_timer: threading.Timer | None = None
         self._preroll_blocks = max(0, int(preroll_s * SAMPLE_RATE / BLOCK))
         self._ring = deque(maxlen=self._preroll_blocks + 2)
         self._chunks = None  # None = spelar inte in
@@ -42,7 +65,7 @@ class Recorder:
         self._stream = None
         self._last_frame_t = 0.0
         self.level = 0.0
-        if keep_open:
+        if self._mode == ALWAYS:
             try:
                 with self._stream_lock:
                     self._open_stream()
@@ -54,12 +77,24 @@ class Recorder:
         with self._lock:
             return self._chunks is not None
 
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    @property
+    def stream_open(self) -> bool:
+        return self._stream is not None
+
     def start(self) -> None:
         with self._stream_lock:
+            self._cancel_idle_close()
+            already_open = self._stream is not None
             self._ensure_stream()
             with self._lock:
+                # Förstart finns bara om strömmen redan var öppen: en nyss
+                # öppnad ström har ingen historik att ta med.
                 preroll = []
-                if self._keep_open and self._preroll_blocks:
+                if already_open and self._preroll_blocks:
                     preroll = list(self._ring)[-self._preroll_blocks:]
                 self._chunks = preroll
 
@@ -67,8 +102,11 @@ class Recorder:
         with self._stream_lock:
             with self._lock:
                 chunks, self._chunks = self._chunks, None
-            if not self._keep_open:
+                self._ring.clear()  # spara inget ljud mellan dikteringar
+            if self._mode == CLOSED:
                 self._close_stream()
+            elif self._mode == ON_DEMAND:
+                self._schedule_idle_close()
         if not chunks:
             return np.zeros(0, dtype=np.float32)
         return np.concatenate(chunks)[:, 0]
@@ -91,12 +129,40 @@ class Recorder:
     def restart(self) -> None:
         """Byt till den mikrofon som nu är systemets standard."""
         with self._stream_lock:
+            self._cancel_idle_close()
             with self._lock:
                 self._chunks = None
             self._close_stream()
             self._reset_portaudio()
-            if self._keep_open:
+            if self._mode == ALWAYS:
                 self._open_stream()
+
+    def set_mode(self, mode: str, idle_close_s: float | None = None) -> None:
+        """Byter läge live från Inställningar: öppnar eller stänger strömmen
+        så att mikrofonikonen omedelbart stämmer med det valda läget."""
+        if idle_close_s is not None:
+            self._idle_close_s = max(0.0, float(idle_close_s))
+        if mode not in MODES or mode == self._mode:
+            return
+        self._mode = mode
+        with self._stream_lock:
+            self._cancel_idle_close()
+            if self.recording:
+                return  # en pågående diktering rörs inte; nästa stop() gäller
+            if mode == ALWAYS:
+                if self._stream is None:
+                    try:
+                        self._open_stream()
+                    except Exception:
+                        log.exception("Kunde inte öppna mikrofonen")
+            else:
+                self._close_stream()
+
+    def close(self) -> None:
+        """Stänger ner allt (vid avslut)."""
+        with self._stream_lock:
+            self._cancel_idle_close()
+            self._close_stream()
 
     # -- Internt --------------------------------------------------------------
 
@@ -110,6 +176,33 @@ class Recorder:
                 self._chunks.append(indata.copy())
             else:
                 self._ring.append(indata.copy())
+
+    def _schedule_idle_close(self) -> None:
+        """Anropas med _stream_lock hållet."""
+        if self._idle_close_s <= 0:
+            self._close_stream()
+            return
+        timer = threading.Timer(self._idle_close_s, self._idle_close)
+        timer.daemon = True
+        self._idle_timer = timer
+        timer.start()
+
+    def _cancel_idle_close(self) -> None:
+        timer, self._idle_timer = self._idle_timer, None
+        if timer is not None:
+            timer.cancel()
+
+    def _idle_close(self) -> None:
+        with self._stream_lock:
+            self._idle_timer = None
+            # En diktering som hann starta medan timern väntade på låset äger
+            # strömmen — då stänger vi ingenting.
+            if self.recording or self._mode != ON_DEMAND:
+                return
+            log.debug(
+                "Ingen diktering på %.0f s – stänger mikrofonen", self._idle_close_s
+            )
+            self._close_stream()
 
     def _ensure_stream(self) -> None:
         if self._stream is not None:

@@ -35,7 +35,10 @@ explicit = true
 viska = "viska.app:main"
 
 [dependency-groups]
-dev = ["pyinstaller>=6.10"]
+dev = ["pyinstaller>=6.10", "pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [build-system]
 requires = ["hatchling"]

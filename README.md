@@ -45,13 +45,21 @@ separate multilingual Whisper model. Audio and text are processed locally.
 ## Highlights
 
 - **Push-to-talk or toggle.** Hold the hotkey like a walkie-talkie, or tap once to start
-  and once to stop.
+  and once to stop. Bind it to a key, a key combination, or a spare mouse button
+  (thumb buttons or the wheel click).
+- **The microphone opens only when you dictate.** By default the stream is opened on the
+  hotkey and closed again a short while after the last dictation, so the Windows
+  microphone indicator is lit only while Viska is actually listening.
+- **Replacement rules.** Words the model mishears are always written correctly. Correct the
+  last dictation from the tray menu and Viska turns the difference into rules.
 - **Application-aware profiles.** Give Outlook, Visual Studio Code, a terminal, or any
   other app its own vocabulary, insertion method, language, and polishing task.
 - **Reusable writing templates.** Built-in email, commit-message, chat, formal, and concise
   templates can be edited or replaced with your own.
 - **Voice formatting.** Spoken commands such as “new line” and “new paragraph” become
   formatting instead of literal words.
+- **Measured, not guessed.** Every dictation is timed — transcription, polishing and
+  insertion — and the median is shown in advanced settings and written to the log.
 - **Clipboard-aware insertion.** Dictated text is excluded from Windows clipboard history
   and cloud clipboard sync; the previous clipboard content is restored by default.
 - **Graceful fallback.** If polishing is unavailable or times out, Viska inserts the raw
@@ -102,6 +110,7 @@ polishing currently requires the GPU path.
 | Polish selected text | **F8** | Rewrites the current selection using the app's configured template. |
 | Choose a one-off tone | Double-tap **F8** | Opens a small menu without changing saved settings. |
 | Switch language | Tray menu | Explicitly switches between Swedish and English; app profiles never change language silently. |
+| Correct the last dictation | Tray menu | Edit the text; the changed words become replacement rules for every future dictation. |
 
 The tray menu also exposes recent dictations, microphone selection, settings, update
 status, and application exit. History lives only in RAM unless disk persistence is
@@ -156,6 +165,7 @@ still be reviewed before sending; small local models can make language mistakes.
 
 | Data | Default behaviour |
 | --- | --- |
+| Microphone | Opened on the hotkey and closed again once you stop dictating (configurable). |
 | Audio | Processed in memory and never saved. |
 | Speech recognition | Runs locally with faster-whisper. |
 | Text polishing | Runs locally with llama.cpp, or optionally against a user-configured local Ollama instance. |
@@ -185,8 +195,21 @@ Useful defaults include:
 | `model` | `auto` | Large KB-Whisper on GPU, small on CPU |
 | `live` | `auto` | Enabled on GPU, disabled on CPU |
 | `inject_mode` | `paste` | Protected clipboard insertion or character-by-character typing |
+| `mic_mode` | `on_demand` | Microphone stream open only around dictation (`always`, `closed`) |
+| `mic_idle_close_s` | `20` | Seconds of silence before the stream is closed again |
+| `replacements` | `{}` | Heard phrase to written text, applied after transcription |
 | `history_persist` | `false` | Keep recent dictations in memory only |
 | `flow` | `false` | Polish full dictations before insertion |
+
+## Tests
+
+The pure logic — configuration migration and atomic writes, replacement rules, the rules
+derived from a correction, hotkey parsing, template resolution and the update version
+comparison — is covered by a small suite that needs neither a GPU nor a microphone:
+
+```bash
+uv run --group dev pytest
+```
 
 ## Build a portable release
 

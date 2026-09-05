@@ -12,9 +12,9 @@ import queue
 import tkinter as tk
 from tkinter import ttk
 
-from viska import autostart, focus, llm, ui
+from viska import autostart, focus, llm, metrics, ui
 from viska.config import CONFIG_PATH, LOG_PATH
-from viska.hotkey import HotkeyError, parse_hotkey
+from viska.hotkey import HotkeyError, is_mouse, parse_hotkey
 
 # Livekänsla: (passintervall, tystnadskrav). Kortare = ivrigare inskrivning.
 FEELS = {
@@ -30,6 +30,20 @@ QUALITY = {
 }
 
 _LIVE_CHOICES = {"Auto (på med GPU)": "auto", "På": True, "Av": False}
+# Mikrofonläge: "Vid diktering" är förvalet — mikrofonikonen i aktivitetsfältet
+# ska bara lysa när Viska faktiskt lyssnar.
+_MIC_CHOICES = {
+    "Vid diktering": "on_demand",
+    "Alltid på": "always",
+    "Stäng direkt": "closed",
+}
+# Musknappar som går att binda dikteringen till. Vänster och höger saknas
+# medvetet — de behövs för att kunna använda datorn.
+_MOUSE_BUTTONS = {
+    "Mus 4 (tumknapp bakåt)": "mouse4",
+    "Mus 5 (tumknapp framåt)": "mouse5",
+    "Hjulklick": "mouse3",
+}
 _INJECT_CHOICES = {"Klistra in (standard)": "paste", "Skriv tecken för tecken": "type"}
 _PROFILE_LANG = {"Samma som aktivt": None, "Svenska": "sv", "Engelska": "en"}
 
@@ -180,12 +194,17 @@ class SettingsWindow:
 
         self._hotkey = tk.StringVar(value=cfg["hotkey"])
         holder = self._row(
-            general, "Dikteringstangent", hint="Klicka och tryck på tangenten"
+            general,
+            "Dikteringstangent",
+            hint="Klicka och tryck på tangenten, eller välj en musknapp",
         )
         self._hotkey_btn = ttk.Button(
             holder, text=cfg["hotkey"].upper(), width=20, command=self._capture_hotkey
         )
-        self._hotkey_btn.pack()
+        self._hotkey_btn.pack(side="left")
+        ttk.Button(holder, text="Mus…", width=6, command=self._mouse_menu).pack(
+            side="left", padx=(4, 0)
+        )
 
         current_feel = next(
             (
@@ -224,6 +243,15 @@ class SettingsWindow:
             holder, textvariable=self._quality, values=q_values,
             state="readonly", width=_FIELD_W - 2,
         ).pack()
+
+        reverse_mic = {v: k for k, v in _MIC_CHOICES.items()}
+        self._mic_mode = tk.StringVar(
+            value=reverse_mic.get(cfg["mic_mode"], "Vid diktering")
+        )
+        holder = self._row(
+            general, "Mikrofon", hint="När mikrofonikonen lyser i aktivitetsfältet"
+        )
+        ui.Segmented(holder, list(_MIC_CHOICES), self._mic_mode).frame.pack()
 
         self._sounds = tk.BooleanVar(value=bool(cfg["sounds"]))
         holder = self._row(general, "Ljudsignaler")
@@ -351,6 +379,55 @@ class SettingsWindow:
         self._reverse_inject = reverse_inject
         self._refresh_profile_list()
 
+        ui.section(wordlist, "Ersättningsregler")
+        self._hint(
+            wordlist,
+            "Ord Whisper hör fel skrivs alltid rätt. Fylls enklast på via\n"
+            "\"Rätta senaste dikteringen…\" i traymenyn.",
+        )
+        stored_replacements = cfg["replacements"]
+        self._replacements = (
+            {
+                k: v
+                for k, v in stored_replacements.items()
+                if isinstance(k, str) and isinstance(v, str)
+            }
+            if isinstance(stored_replacements, dict)
+            else {}
+        )
+        self._repl_order: list[str] = []
+        repl_box = tk.Frame(wordlist, bg=pal["window"])
+        repl_box.pack(fill="x", pady=(4, 0))
+        self._repl_list = ui.themed_listbox(repl_box, height=4, exportselection=False)
+        self._repl_list.pack(side="left", fill="both", expand=True)
+        repl_buttons = tk.Frame(repl_box, bg=pal["window"])
+        repl_buttons.pack(side="left", fill="y", padx=(8, 0))
+        ttk.Button(
+            repl_buttons, text="Ta bort", width=12, command=self._remove_replacement
+        ).pack(pady=2)
+        repl_add = tk.Frame(wordlist, bg=pal["window"])
+        repl_add.pack(fill="x", pady=(6, 0))
+        self._repl_heard = tk.StringVar()
+        self._repl_write = tk.StringVar()
+        tk.Label(
+            repl_add, text="Hör", bg=pal["window"], fg=pal["text"],
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+        ttk.Entry(repl_add, textvariable=self._repl_heard, width=16).pack(
+            side="left", padx=(6, 6)
+        )
+        tk.Label(
+            repl_add, text="skriv", bg=pal["window"], fg=pal["text"],
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+        ttk.Entry(repl_add, textvariable=self._repl_write, width=16).pack(
+            side="left", padx=(6, 6)
+        )
+        ttk.Button(repl_add, text="Lägg till", command=self._add_replacement).pack(
+            side="left"
+        )
+        self._refresh_replacements()
+
         ui.section(wordlist, "Röstkommandon")
         self._hint(
             wordlist,
@@ -396,6 +473,9 @@ class SettingsWindow:
         adv_entry("Max inspelning (s)", "max_recording_s", cfg["max_recording_s"])
         adv_entry("Hålltröskel (s)", "hold_threshold_s", cfg["hold_threshold_s"])
         adv_entry("Poleringstangent", "polish_hotkey", cfg["polish_hotkey"])
+        adv_entry(
+            "Stäng mikrofonen efter (s)", "mic_idle_close_s", cfg["mic_idle_close_s"]
+        )
         adv_combo(
             "Poleringsbackend", "polish_backend", cfg["polish_backend"],
             ["builtin", "ollama"],
@@ -403,14 +483,12 @@ class SettingsWindow:
         adv_entry("Ollama-modell", "polish_ollama_model", cfg["polish_ollama_model"])
         self._restore = tk.BooleanVar(value=bool(cfg["restore_clipboard"]))
         self._append = tk.BooleanVar(value=bool(cfg["append_space"]))
-        self._keep_mic = tk.BooleanVar(value=bool(cfg["keep_mic_open"]))
         self._updates = tk.BooleanVar(value=bool(cfg["check_updates"]))
         self._history_persist = tk.BooleanVar(value=bool(cfg["history_persist"]))
         ui.section(advanced, "Beteende")
         for text, var in (
             ("Återställ klippbordet efter inklistring", self._restore),
             ("Mellanslag efter varje diktering", self._append),
-            ("Håll mikrofonströmmen öppen (ingen klippt start)", self._keep_mic),
             ("Sök efter uppdateringar vid start", self._updates),
             ("Spara historik på disk (annars bara i minnet)", self._history_persist),
         ):
@@ -428,6 +506,13 @@ class SettingsWindow:
         ttk.Entry(
             holder, textvariable=self._github_token, width=_FIELD_W, show="•"
         ).pack()
+        ui.section(advanced, "Prestanda")
+        self._hint(
+            advanced,
+            metrics.summary()
+            or "Inga dikteringar mätta än – siffrorna dyker upp efter första.",
+        )
+
         files = tk.Frame(advanced, bg=pal["window"])
         files.pack(anchor="w", pady=(10, 0))
         ttk.Button(
@@ -505,6 +590,54 @@ class SettingsWindow:
         self._hotkey_btn.bind("<Key>", self._on_capture_key)
         self._hotkey_btn.bind("<FocusOut>", self._cancel_capture)
         self._hotkey_btn.focus_set()
+
+    def _mouse_menu(self) -> None:
+        """Musknappar går inte att fånga i tkinter på ett tillförlitligt sätt
+        (Windows-Tk levererar inte tumknapparna), så de väljs ur en lista."""
+        self._cancel_capture()
+        menu = tk.Menu(self.win, tearoff=0)
+        for label, key in _MOUSE_BUTTONS.items():
+            menu.add_command(
+                label=label, command=lambda k=key: self._set_hotkey(k)
+            )
+        try:
+            menu.tk_popup(
+                self._hotkey_btn.winfo_rootx(),
+                self._hotkey_btn.winfo_rooty() + self._hotkey_btn.winfo_height(),
+            )
+        finally:
+            menu.grab_release()
+
+    def _set_hotkey(self, key: str) -> None:
+        self._hotkey.set(key)
+        self._hotkey_btn.config(text=key.upper())
+
+    # -- Ersättningsregler ---------------------------------------------------------
+
+    def _refresh_replacements(self) -> None:
+        self._repl_list.delete(0, "end")
+        self._repl_order = sorted(self._replacements, key=str.lower)
+        for heard in self._repl_order:
+            self._repl_list.insert("end", f"{heard}  →  {self._replacements[heard]}")
+
+    def _add_replacement(self) -> None:
+        heard = self._repl_heard.get().strip()
+        write = self._repl_write.get().strip()
+        if not heard or not write:
+            self._error.config(text="Fyll i både hörd fras och text att skriva.")
+            return
+        self._replacements[heard] = write
+        self._repl_heard.set("")
+        self._repl_write.set("")
+        self._error.config(text="")
+        self._refresh_replacements()
+
+    def _remove_replacement(self) -> None:
+        selection = self._repl_list.curselection()
+        if not selection or selection[0] >= len(self._repl_order):
+            return
+        self._replacements.pop(self._repl_order[selection[0]], None)
+        self._refresh_replacements()
 
     def _cancel_capture(self, _event=None) -> None:
         if not self._capturing:
@@ -1015,7 +1148,8 @@ class SettingsWindow:
             "inject_mode": _INJECT_CHOICES[self._inject.get()],
             "restore_clipboard": self._restore.get(),
             "append_space": self._append.get(),
-            "keep_mic_open": self._keep_mic.get(),
+            "mic_mode": _MIC_CHOICES[self._mic_mode.get()],
+            "replacements": dict(self._replacements),
             "check_updates": self._updates.get(),
             "history_persist": self._history_persist.get(),
             "github_token": self._github_token.get().strip(),
@@ -1045,6 +1179,9 @@ class SettingsWindow:
         changes["hold_threshold_s"] = float(
             self._adv["hold_threshold_s"].get().replace(",", ".") or 0.35
         )
+        changes["mic_idle_close_s"] = float(
+            self._adv["mic_idle_close_s"].get().replace(",", ".") or 20
+        )
         changes["polish_hotkey"] = self._adv["polish_hotkey"].get().strip() or "f8"
         backend = self._adv["polish_backend"].get().strip()
         changes["polish_backend"] = backend if backend in ("builtin", "ollama") else "builtin"
@@ -1060,6 +1197,8 @@ class SettingsWindow:
             self._save_profile()
         if self._template_name.get().strip():
             self._save_template()
+        if self._repl_heard.get().strip() and self._repl_write.get().strip():
+            self._add_replacement()
         try:
             changes = self.values()
         except ValueError as e:
@@ -1070,6 +1209,11 @@ class SettingsWindow:
             parse_hotkey(changes["polish_hotkey"])
         except HotkeyError as e:
             self._error.config(text=str(e))
+            return
+        if is_mouse(changes["polish_hotkey"]):
+            self._error.config(
+                text="Poleringstangenten kan inte vara en musknapp."
+            )
             return
         if changes["hotkey"] == changes["polish_hotkey"]:
             self._error.config(

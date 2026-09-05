@@ -1,20 +1,44 @@
-"""Konfiguration som läses från %APPDATA%\\viska\\config.json."""
+"""Konfiguration som läses från %APPDATA%\\viska\\config.json.
+
+Filen skrivs alltid atomiskt (temp + os.replace): ett strömavbrott mitt i
+skrivningen kan aldrig lämna en halv fil efter sig. Går den ändå inte att
+läsa flyttas den till config.json.bak i stället för att tyst skrivas över —
+en handredigerad config med ett kommatecken fel ska gå att rädda.
+
+Nya nycklar behöver ingen migrering: de saknas i filen och tar sitt värde
+från DEFAULTS. Migreringarna i migrate() är till för nycklar som BYTT
+betydelse. Därför sammanfogas inte dict-värden med defaults heller — då
+hade en borttagen rad i voice_commands återuppstått vid varje start.
+"""
 
 import json
+import logging
 import os
+import tempfile
 from collections.abc import Iterable
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 APP_NAME = "viska"
 CONFIG_DIR = Path(os.environ.get("APPDATA", str(Path.home()))) / APP_NAME
 CONFIG_PATH = CONFIG_DIR / "config.json"
+CONFIG_BACKUP_PATH = CONFIG_DIR / "config.json.bak"
 LOG_PATH = CONFIG_DIR / "viska.log"
 HISTORY_PATH = CONFIG_DIR / "history.json"
 
+CONFIG_VERSION = 2
+
 DEFAULTS = {
+    # Configfilens format. Höjs bara när en nyckel byter betydelse och
+    # måste migreras (se _migrate).
+    "config_version": CONFIG_VERSION,
     # Tangent som styr dikteringen. Kort tryck = starta/stoppa,
     # håll inne = prata så länge tangenten hålls (walkie-talkie).
-    # T.ex. "f9", "f8", "scroll lock", "ctrl+alt+d".
+    # T.ex. "f9", "f8", "scroll lock", "ctrl+alt+d". Musknappar går också:
+    # "mouse4"/"mouse5" (tumknapparna) och "mouse3" (hjulklick). Vänster och
+    # höger musknapp går medvetet inte att välja — de behövs för att kunna
+    # använda datorn.
     "hotkey": "f9",
     # Tryck kortare än så här räknas som "växla", längre som "håll".
     "hold_threshold_s": 0.35,
@@ -65,6 +89,13 @@ DEFAULTS = {
         "new line": "\n",
         "new paragraph": "\n\n",
     },
+    # Ersättningsregler: hörd fras -> text som skrivs in i stället. Körs
+    # efter transkriberingen och är därför deterministiska, till skillnad
+    # från ordlistan (initial_prompt) som bara är ett tips till Whisper.
+    # Fylls enklast på via "Rätta senaste dikteringen…" i traymenyn.
+    # Nyckeln matchas som hela ord, skiftlägesokänsligt; är den hörda frasen
+    # versaliserad i texten versaliseras ersättningen på samma sätt.
+    "replacements": {},
     # Polering: markera text var som helst, tryck tangenten, få den
     # omskriven av en lokal LLM. Modellen laddas ner via Inställningar.
     "polish_hotkey": "f8",
@@ -162,10 +193,21 @@ DEFAULTS = {
     # null = systemets standardmikrofon. Annars namn eller index från
     # `viska --list-devices`.
     "input_device": None,
-    # Håller mikrofonströmmen öppen mot en liten RAM-ringbuffert så att
-    # första stavelsen inte klipps. Windows visar då mikrofonikonen
-    # konstant; sätt false om det stör (ger lätt klippt start).
-    "keep_mic_open": True,
+    # När mikrofonströmmen är öppen. Windows visar mikrofonikonen i
+    # aktivitetsfältet så länge den är det.
+    #   "on_demand" – öppnas vid dikteringen och stängs mic_idle_close_s
+    #                 sekunder efter den sista. Ikonen syns bara när Viska
+    #                 faktiskt lyssnar, och diktering på diktering är ändå
+    #                 igång direkt (strömmen hinner inte stängas).
+    #   "always"    – alltid öppen mot en liten RAM-ringbuffert. Ger
+    #                 förstarten som skyddar första stavelsen, till priset
+    #                 av en mikrofonikon som alltid lyser.
+    #   "closed"    – stängs direkt efter varje diktering.
+    "mic_mode": "on_demand",
+    # Hur länge strömmen får stå öppen efter en diktering i on_demand-läget.
+    "mic_idle_close_s": 20,
+    # Ljud som tas med från FÖRE tangenttrycket (kräver en redan öppen ström:
+    # gäller "always", och "on_demand" när strömmen fortfarande är varm).
     "preroll_s": 0.25,
     "sounds": True,
 }
@@ -173,21 +215,83 @@ DEFAULTS = {
 
 def load() -> dict:
     cfg = dict(DEFAULTS)
-    if CONFIG_PATH.exists():
-        try:
-            cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
-        except (json.JSONDecodeError, OSError):
-            pass  # trasig fil: kör vidare på defaults, skriv inte över
-    else:
+    stored = read_stored(CONFIG_PATH)
+    if stored is None:
+        save(cfg)  # saknas eller trasig (då redan säkerhetskopierad)
+        return cfg
+    # Versionen läses ur den SPARADE filen, inte ur den sammanslagna dicten:
+    # den senare har alltid dagens config_version från DEFAULTS och hade fått
+    # varje migrering att se ut som redan gjord.
+    stored_version = stored.get("config_version", 1)
+    cfg.update(stored)
+    if migrate(cfg, stored_version):
         save(cfg)
     return cfg
 
 
+def read_stored(path: Path) -> dict | None:
+    """Configfilen som dict, eller None om den saknas eller inte går att
+    läsa. En trasig fil flyttas till config.json.bak först: den ska varken
+    tolkas eller tyst skrivas över av nästa Spara."""
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as e:
+        backup = path.with_name(path.name + ".bak")
+        try:
+            os.replace(path, backup)
+            log.warning("Configfilen gick inte att läsa (%s) – sparad som %s", e, backup)
+        except OSError:
+            log.exception("Configfilen gick inte att läsa och inte heller flyttas")
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def migrate(cfg: dict, from_version: int | None = None) -> bool:
+    """Uppdaterar cfg på plats till CONFIG_VERSION. Returnerar True om något
+    ändrades (då ska filen skrivas om). from_version är versionen som stod i
+    filen; utelämnad läses den ur cfg."""
+    version = cfg.get("config_version", 1) if from_version is None else from_version
+    if not isinstance(version, int):
+        version = 1
+    changed = False
+    if version < 2:
+        # keep_mic_open (bool) -> mic_mode (tre lägen). True var det gamla
+        # förvalet som ingen aktivt valde, så det blir det nya förvalet
+        # on_demand; ett uttryckligt False betydde "stäng direkt".
+        keep_open = cfg.pop("keep_mic_open", None)
+        if keep_open is False:
+            cfg["mic_mode"] = "closed"
+        changed = True
+    if changed or cfg.get("config_version") != CONFIG_VERSION:
+        cfg["config_version"] = CONFIG_VERSION
+        changed = True
+    return changed
+
+
 def save(cfg: dict) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(
-        json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    _write_json(CONFIG_PATH, cfg)
+
+
+def _write_json(path: Path, data) -> None:
+    """Skriver atomiskt: hela filen hamnar i en temp-fil i samma katalog och
+    byter sedan namn med os.replace (atomärt på NTFS). Ett avbrott mitt i
+    skrivningen kan aldrig lämna en trunkerad config eller historik."""
+    text = json.dumps(data, indent=2, ensure_ascii=False)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def load_history() -> list[str]:
@@ -204,9 +308,7 @@ def load_history() -> list[str]:
 
 def save_history(items: Iterable[str]) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    HISTORY_PATH.write_text(
-        json.dumps(list(items), indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    _write_json(HISTORY_PATH, list(items))
 
 
 def delete_history() -> None:
