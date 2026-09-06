@@ -99,6 +99,14 @@ DEFAULTS = {
     # Polering: markera text var som helst, tryck tangenten, få den
     # omskriven av en lokal LLM. Modellen laddas ner via Inställningar.
     "polish_hotkey": "f8",
+    # Tonvalsmenyn har en EGEN tangent i stället för dubbeltryck. Skälet är
+    # latens: ett dubbeltrycksfönster måste fördröja varje enkeltryck lika
+    # länge för att kunna skilja dem åt, så poleringen började alltid 0,4 s
+    # för sent. Tom sträng = ingen menytangent.
+    "polish_menu_hotkey": "shift+f8",
+    # Vill man ändå ha det gamla dubbeltrycket på poleringstangenten: sätt
+    # true. Då återkommer fördröjningen på varje enkeltryck.
+    "polish_double_tap": False,
     # Global uppgiftsbeskrivning som "Egen text" (tom = "skriv om till
     # korrekt text"). Används när polish_template nedan är tom. Behålls som
     # bakåtkompatibelt förval: äldre config-filer med fritext här fortsätter
@@ -173,6 +181,28 @@ DEFAULTS = {
     # kräva den så att inget annat program på datorn kan använda tjänsten.
     "polish_http_token": "",
     "polish_http_timeout_s": 60,
+    # Kommando som startar den lokala poleringstjänsten. Är det ifyllt kan
+    # Viska starta och stoppa den från Inställningar → Polering i stället för
+    # att den måste dras igång för hand vid varje omstart. Tom = av.
+    # T.ex.: uv run --directory C:\\Users\\du\\Code\\viska tools/polish_server.py
+    "polish_http_command": "",
+    # Meningen som "Testa polering" skickar. Redigerbar i Inställningar så att
+    # man kan prova sin egen typiska diktering.
+    "polish_test_text": (
+        "hej ehm jag ville bara höra om vi kan flytta mötet på torsdag till "
+        "fredag i stället för jag har en grej som krockar"
+    ),
+    # Kommando som startar den lokala poleringstjänsten. Är det ifyllt kan
+    # Viska starta och stoppa den från Inställningar → Polering i stället för
+    # att den måste dras igång för hand vid varje omstart. Tom = av.
+    # T.ex.: uv run --directory C:\\Users\\du\\Code\\viska tools/polish_server.py
+    "polish_http_command": "",
+    # Meningen som "Testa polering" skickar. Redigerbar i Inställningar så att
+    # man kan prova sin egen typiska diktering.
+    "polish_test_text": (
+        "hej ehm jag ville bara höra om vi kan flytta mötet på torsdag till "
+        "fredag i stället för jag har en grej som krockar"
+    ),
     "polish_model_repo": "unsloth/Qwen3-4B-Instruct-2507-GGUF",
     # Filnamn i %APPDATA%\viska\llm — eller en absolut sökväg till en egen
     # GGUF (t.ex. en Ollama-blob).

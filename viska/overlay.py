@@ -8,7 +8,9 @@ Två egenheter att känna till:
   via en kö som huvudtråden tömmer med jämna mellanrum.
 
 - Fönstret får WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW: skulle pillen ta
-  fokus när den visas hamnar den inklistrade texten i fel fönster.
+  fokus när den visas hamnar den inklistrade texten i fel fönster. Det är
+  också det som gör knapparna i pillen ofarliga: ett klick kör callbacken
+  utan att ta fokus från appen texten ska skrivas in i.
 """
 
 import ctypes
@@ -79,6 +81,9 @@ class Overlay:
             pady=8,
         )
         self._label.pack(side="left", padx=(14, 12))
+        # Knappar för väntan som går att avbryta (poleringen i flow-läget).
+        self._actions = tk.Frame(self._frame, bg=RED)
+        self._action_buttons: list[tk.Button] = []
         self._recording = False
         self._hide_job = None
         self._poll()
@@ -91,20 +96,25 @@ class Overlay:
         color: str = RED,
         auto_hide_ms: int | None = None,
         meter: bool = False,
+        actions: list | None = None,
     ):
-        self._queue.put(("show", text, color, auto_hide_ms, meter))
+        """actions: lista av (etikett, callback). Knapparna ritas i pillen och
+        callbacken körs i huvudtråden — håll den kort (sätt en flagga)."""
+        self._queue.put(("show", text, color, auto_hide_ms, meter, actions))
 
     def hide(self) -> None:
-        self._queue.put(("hide", None, None, None, False))
+        self._queue.put(("hide", None, None, None, False, None))
 
     # -- Körs i huvudtråden -----------------------------------------------------
 
     def _poll(self) -> None:
         try:
             while True:
-                action, text, color, auto_hide_ms, meter = self._queue.get_nowait()
+                (
+                    action, text, color, auto_hide_ms, meter, actions
+                ) = self._queue.get_nowait()
                 if action == "show":
-                    self._show(text, color, auto_hide_ms, meter)
+                    self._show(text, color, auto_hide_ms, meter, actions)
                 else:
                     self._recording = False
                     self._win.withdraw()
@@ -123,14 +133,20 @@ class Overlay:
         _round_corners(hwnd)
 
     def _show(
-        self, text: str, color: str, auto_hide_ms: int | None, meter: bool
+        self,
+        text: str,
+        color: str,
+        auto_hide_ms: int | None,
+        meter: bool,
+        actions: list | None = None,
     ) -> None:
         if self._hide_job is not None:
             self._root.after_cancel(self._hide_job)
             self._hide_job = None
-        for w in (self._frame, self._meter, self._label):
+        for w in (self._frame, self._meter, self._label, self._actions):
             w.config(bg=color)
         self._label.config(text=text)
+        self._set_actions(actions, color)
         self._recording = meter and self._level_source is not None
         if self._recording:
             self._meter.pack(side="left", padx=(0, 14))
@@ -147,6 +163,34 @@ class Overlay:
         self._win.deiconify()
         if auto_hide_ms:
             self._hide_job = self._root.after(auto_hide_ms, self._win.withdraw)
+
+    def _set_actions(self, actions: list | None, color: str) -> None:
+        for button in self._action_buttons:
+            button.destroy()
+        self._action_buttons = []
+        if not actions:
+            self._actions.pack_forget()
+            return
+        for label, callback in actions:
+            button = tk.Button(
+                self._actions,
+                text=label,
+                command=callback,
+                font=("Segoe UI", 8, "bold"),
+                fg="white",
+                bg=color,
+                activebackground=color,
+                activeforeground="white",
+                relief="solid",
+                borderwidth=1,
+                highlightthickness=0,
+                padx=8,
+                pady=1,
+                cursor="hand2",
+            )
+            button.pack(side="left", padx=(0, 6))
+            self._action_buttons.append(button)
+        self._actions.pack(side="left", padx=(0, 10))
 
     def _draw_meter(self) -> None:
         try:

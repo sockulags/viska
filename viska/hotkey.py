@@ -105,6 +105,20 @@ class HotkeyError(Exception):
     pass
 
 
+# RegisterHotKey-id:n måste vara unika per tråd/process. Tidigare hade
+# klasserna varsitt fast id, vilket tyst gick sönder så fort en tredje
+# tangent (tonvalsmenyn) skulle registreras.
+_id_lock = threading.Lock()
+_next_id = 0
+
+
+def _alloc_hotkey_id() -> int:
+    global _next_id
+    with _id_lock:
+        _next_id += 1
+        return _next_id
+
+
 def is_mouse(hotkey: str) -> bool:
     """True om bindningen styrs av en musknapp (då krävs MouseTrigger)."""
     return any(part.strip() in _MOUSE_VKS for part in hotkey.lower().split("+"))
@@ -205,9 +219,8 @@ class _HoldToggle:
 class PushToTalk(_HoldToggle):
     """Håll/växla på en tangent, registrerad med RegisterHotKey."""
 
-    _HOTKEY_ID = 1
-
     def __init__(self, hotkey: str, hold_threshold_s: float, on_start, on_stop):
+        self._HOTKEY_ID = _alloc_hotkey_id()
         self._mods, vk = parse_hotkey(hotkey)
         if is_mouse(hotkey):
             raise HotkeyError(
@@ -268,12 +281,13 @@ class ActionKey:
     Anges on_double skiljs dessutom enkel- från dubbeltryck: ett andra
     tryck inom double_tap_s räknas som dubbeltryck (on_double), annars
     fördröjs enkeltrycket (on_press) tills fönstret gått ut så trycken
-    kan skiljas åt. Utan on_double sker inget dubbeltrycksfönster och
-    on_press körs direkt vid varje nedtryck (noll extra fördröjning)."""
-
-    _HOTKEY_ID = 2
+    kan skiljas åt. Det kostar double_tap_s på VARJE enkeltryck, så
+    dubbeltrycket är numera avstängt som standard: tonvalsmenyn har en
+    egen tangent i stället. Utan on_double körs on_press direkt vid varje
+    nedtryck (noll extra fördröjning)."""
 
     def __init__(self, hotkey: str, on_press, on_double=None, double_tap_s: float = 0.4):
+        self._HOTKEY_ID = _alloc_hotkey_id()
         self._mods, self._vk = parse_hotkey(hotkey)
         if is_mouse(hotkey):
             # Poleringen har inget håll-läge och delar därför inte
@@ -304,8 +318,8 @@ class ActionKey:
             None, self._HOTKEY_ID, self._mods | MOD_NOREPEAT, self._vk
         ):
             self._error = (
-                f"Poleringstangenten '{self._hotkey_str.upper()}' är upptagen "
-                f"av ett annat program (Win32-fel {ctypes.get_last_error()}). "
+                f"Tangenten '{self._hotkey_str.upper()}' är upptagen av ett "
+                f"annat program (Win32-fel {ctypes.get_last_error()}). "
                 "Byt den i Inställningar."
             )
             self._ready.set()

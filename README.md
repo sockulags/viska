@@ -63,7 +63,8 @@ separate multilingual Whisper model. Audio and text are processed locally.
 - **Clipboard-aware insertion.** Dictated text is excluded from Windows clipboard history
   and cloud clipboard sync; the previous clipboard content is restored by default.
 - **Graceful fallback.** If polishing is unavailable or times out, Viska inserts the raw
-  transcript instead of losing the dictation.
+  transcript instead of losing the dictation. While it runs, the status pill offers
+  *insert raw text now* and *cancel*, so a slow model never has to be waited out.
 - **Portable distribution.** Release builds run without Python, installation, or
   administrator access.
 
@@ -108,7 +109,7 @@ polishing currently requires the GPU path.
 | Dictate while held | Hold **F9** | Records while the key is down, then transcribes and inserts. |
 | Longer dictation | Tap **F9**, then tap again | Starts and stops without holding the key. |
 | Polish selected text | **F8** | Rewrites the current selection using the app's configured template. |
-| Choose a one-off tone | Double-tap **F8** | Opens a small menu without changing saved settings. |
+| Choose a one-off tone | **Shift+F8** | Opens a small menu without changing saved settings. |
 | Switch language | Tray menu | Explicitly switches between Swedish and English; app profiles never change language silently. |
 | Correct the last dictation | Tray menu | Edit the text; the changed words become replacement rules for every future dictation. |
 
@@ -164,8 +165,10 @@ still be reviewed before sending; small local models can make language mistakes.
 ## Polishing without a local GPU
 
 Machines that cannot run a local model at all can send the polishing step to a remote
-service. Set `polish_backend` to `http` in advanced settings and point `polish_http_url` at
-any OpenAI-compatible `/v1/chat/completions` endpoint. Viska knows nothing about what
+service. Pick **Egen tjänst** as the engine under Polishing and point it at any OpenAI-compatible
+`/v1/chat/completions` endpoint. The same tab shows whether the service answers and can
+polish a sample sentence for you, timing the round trip. Fill in a start command and Viska
+starts and stops the local service for you. Viska knows nothing about what
 answers: an API key, a company gateway, or the small server in
 [`tools/polish_server.py`](tools/polish_server.py), which keeps a Codex process warm and
 runs each rewrite through it.
@@ -227,9 +230,10 @@ offline. Automatic update checks can be disabled in advanced settings.
 
 Most settings are available through the four-tab settings window:
 
-- **General:** language, hotkey, live feel, quality, sounds, and Windows startup
-- **Vocabulary:** global terms and application-specific profiles
-- **Polishing:** engine, global template, template library, Flow mode, and profile overview
+- **General:** language, hotkey, microphone mode, live feel, quality, sounds, and startup
+- **Vocabulary:** global terms, replacement rules, and application-specific profiles
+- **Polishing:** engine (with connection status and a *test polishing* button), global
+  template, template library, Flow mode, and profile overview
 - **Advanced:** model IDs, compute mode, insertion behaviour, privacy controls, and updates
 
 The configuration file is `%APPDATA%\viska\config.json`. It is created on first launch.
@@ -279,7 +283,7 @@ uv run viska --check
 ```
 
 The application log is written to `%APPDATA%\viska\viska.log`. See the
-[v0.5 release notes](docs/release-notes-v0.5.0.md) for the current feature set.
+[v0.6 release notes](docs/release-notes-v0.6.0.md) for the current feature set.
 
 ## Project status
 

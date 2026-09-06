@@ -1,6 +1,6 @@
 [project]
 name = "viska"
-version = "0.5.0"
+version = "0.6.0"
 description = "Lokal diktering för Windows – tala var som helst, texten skrivs där markören är. Ingen data lämnar datorn."
 requires-python = ">=3.11"
 dependencies = [
@@ -39,6 +39,12 @@ dev = ["pyinstaller>=6.10", "pytest>=8"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+filterwarnings = [
+    # Tkinters Variable.__del__ kan köras efter att dess master rivits när
+    # skräpsamlaren kommer ikapp. Upprivningsartefakt i Tk, inte ett fel i
+    # koden — och det dränker annars riktiga varningar.
+    "ignore::pytest.PytestUnraisableExceptionWarning",
+]
 
 [build-system]
 requires = ["hatchling"]

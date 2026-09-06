@@ -4,6 +4,7 @@ import argparse
 import logging
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -58,6 +59,13 @@ FLOW_POLISH_TIMEOUT_S = 10.0
 # stället för att polera direkt. Ett enkeltryck fördröjs så länge (och bara så
 # länge) så trycken kan skiljas åt — ingen annan extra fördröjning.
 POLISH_DOUBLE_TAP_S = 0.4
+
+# Sökbredd för flow-lägets förhandsvisning (vanlig diktering behåller sin).
+LIVE_PREVIEW_BEAM = 1
+
+# Användaren tryckte "Avbryt" i pillen medan poleringen pågick: ingenting
+# skrivs in (råtexten finns kvar i historiken).
+CANCELLED = object()
 
 
 class App:
@@ -127,6 +135,8 @@ class App:
         # raderar och skriver om samma filer som den första.
         self._gpu_busy = threading.Event()
         self._llm_busy = threading.Event()
+        # Den lokala poleringstjänsten, när Viska startat den åt användaren.
+        self._polish_proc: subprocess.Popen | None = None
         # Tangentkonflikter (annat program äger tangenten) ska aldrig hindra
         # appen från att starta — men trayikonen finns inte förrän main()
         # kört klart make_tray(), så notiserna köas här och flushas därifrån.
@@ -134,13 +144,8 @@ class App:
         # PushToTalk eller MouseTrigger beroende på bindningen (se
         # create_push_to_talk); båda har samma håll/växla-kontrakt.
         self.hotkey = None
-        try:
-            self.hotkey = create_push_to_talk(
-                cfg["hotkey"], cfg["hold_threshold_s"], self._on_start, self._on_stop
-            )
-        except HotkeyError as e:
-            log.warning("Dikteringstangenten kunde inte registreras: %s", e)
-            self._startup_notices.append(str(e))
+        self.polish_key = None
+        self.polish_menu_key = None
         self._polisher: llm.Polisher | None = None
         # Skapandet av poleringsmodellen serialiseras: både F8-flödet, flow-
         # lägets förladdning och själva flow-poleringen kan annars försöka
@@ -157,18 +162,12 @@ class App:
             threading.Thread(
                 target=self._refresh_remote_reachable, daemon=True
             ).start()
-        self.polish_key: ActionKey | None = None
-        try:
-            self.polish_key = ActionKey(
-                cfg["polish_hotkey"],
-                self._on_polish_key,
-                on_double=self._on_polish_menu,
-                double_tap_s=POLISH_DOUBLE_TAP_S,
-            )
-        except HotkeyError as e:
-            # Polering är ett tillval — appen ska starta ändå.
-            log.warning("Poleringstangenten kunde inte registreras: %s", e)
-            self._startup_notices.append(str(e))
+        # Dikteringstangenten, poleringstangenten och tonvalsmenyns tangent
+        # registreras i ett svep. En upptagen tangent får aldrig hindra
+        # appen från att starta — notisen köas till trayikonen finns.
+        for notice in self._bind_keys(cfg, keep_on_error=True):
+            log.warning("Tangenten kunde inte registreras: %s", notice)
+            self._startup_notices.append(notice)
         threading.Thread(
             target=self._load_model, args=(self.language,), daemon=True
         ).start()
@@ -177,6 +176,64 @@ class App:
                 __version__, self._on_update_available, token=cfg.get("github_token", "")
             )
         self._poll_quit()
+
+    # -- Tangentbindningar ---------------------------------------------------------
+
+    def _stop_keys(self) -> None:
+        """Släpper alla registreringar. Måste ske innan nya sätts: annars går
+        det inte att byta plats på två tangenter."""
+        for attr in ("hotkey", "polish_key", "polish_menu_key"):
+            key = getattr(self, attr, None)
+            if key is not None:
+                key.stop()
+            setattr(self, attr, None)
+
+    def _bind_keys(self, cfg: dict, keep_on_error: bool = False) -> list[str]:
+        """Registrerar de tre tangenterna enligt cfg. Returnerar felmeddelanden
+        för dem som inte gick att ta.
+
+        keep_on_error=True (vid start) behåller det som lyckades och rapporterar
+        resten; anroparen som byter tangenter vill i stället rulla tillbaka och
+        skickar därför False, kollar returlistan och återställer själv.
+
+        Tonvalsmenyn har en egen tangent i stället för dubbeltryck på
+        poleringstangenten: ett dubbeltrycksfönster måste fördröja varje
+        enkeltryck lika länge för att kunna skilja dem åt, vilket sköt upp all
+        polering 0,4 s. Dubbeltrycket finns kvar som opt-in (polish_double_tap)
+        och slår då automatiskt av menytangenten — annars fanns två vägar till
+        samma meny och den ena kostade latens.
+        """
+        errors: list[str] = []
+        double_tap = bool(cfg.get("polish_double_tap"))
+        try:
+            self.hotkey = create_push_to_talk(
+                cfg["hotkey"], cfg["hold_threshold_s"], self._on_start, self._on_stop
+            )
+        except HotkeyError as e:
+            errors.append(str(e))
+            if not keep_on_error:
+                return errors
+        try:
+            self.polish_key = ActionKey(
+                cfg["polish_hotkey"],
+                self._on_polish_key,
+                on_double=self._on_polish_menu if double_tap else None,
+                double_tap_s=POLISH_DOUBLE_TAP_S,
+            )
+        except HotkeyError as e:
+            # Polering är ett tillval — appen ska fungera ändå.
+            errors.append(str(e))
+            if not keep_on_error:
+                return errors
+        menu_key = (cfg.get("polish_menu_hotkey") or "").strip()
+        if menu_key and not double_tap:
+            try:
+                self.polish_menu_key = ActionKey(menu_key, self._on_polish_menu)
+            except HotkeyError as e:
+                errors.append(str(e))
+                if not keep_on_error:
+                    return errors
+        return errors
 
     def flush_startup_notices(self) -> None:
         """Visar traynotiser för tangenter som inte gick att registrera vid
@@ -546,6 +603,11 @@ class App:
             commit_silence_s=self.cfg["live_commit_silence_s"],
             initial_prompt=self._session_prompt,
             preview_only=preview_only,
+            # Flow: förhandsvisningen syns bara i pillen och ersätts av den
+            # riktiga transkriberingen vid stopp, så den får kosta mindre
+            # GPU. Vanligt liveläge skriver in sina fraser på riktigt och
+            # behåller därför full sökbredd.
+            beam_size=LIVE_PREVIEW_BEAM if preview_only else None,
         )
         self._live.start()
 
@@ -590,14 +652,14 @@ class App:
             self.sounds.stop()
             self._set_tray_recording(False)
             self._session_stopped_at = time.perf_counter()
+            # Ljudet fryses FÖRE livearbetaren stoppas. Att vänta in arbetaren
+            # först kunde hålla mikrofonen öppen i upp till tio sekunder efter
+            # att tangenten släppts, och allt som sades under den väntan
+            # hamnade i inspelningen. Nu släpps mikrofonen direkt; arbetaren
+            # avvecklas på transkriberingstråden, där dess sista committade
+            # frames räknas av mot det redan frysta ljudet.
             live, self._live = self._live, None
-            committed = live.stop() if live is not None else 0
             audio = self.recorder.stop()
-            if committed:
-                audio = audio[committed:]
-            # Kopia: skulle ett hängande livepass leva kvar får det inte
-            # mutera listan som _finish läser.
-            live_texts = list(self._live_texts)
             self._transcribing.set()
             self.overlay.show("Skriver…", BLUE)
             lang = self._session_language
@@ -610,7 +672,7 @@ class App:
         threading.Thread(
             target=self._finish,
             args=(
-                audio, lang, transcriber, live_texts, prompt, inject_mode,
+                audio, lang, transcriber, live, prompt, inject_mode,
                 flow, polish_prompt, target_hwnd,
             ),
             daemon=True,
@@ -622,7 +684,7 @@ class App:
         audio: np.ndarray,
         lang: str,
         transcriber: Transcriber,
-        live_texts: list[str],
+        live: LiveWorker | None,
         prompt: str | None,
         inject_mode: str,
         flow: bool = False,
@@ -630,6 +692,14 @@ class App:
         target_hwnd: int | None = None,
     ) -> None:
         try:
+            # Avveckla livearbetaren här, inte under sessionslåset: ljudet är
+            # redan fryst, så väntan kostar bara den här tråden. Listan läses
+            # EFTER att arbetaren stannat — då kan inget pass hinna committa
+            # en fras som saknas i last_text.
+            committed = live.stop() if live is not None else 0
+            live_texts = list(self._live_texts)
+            if committed:
+                audio = audio[committed:]
             if live_texts:
                 # Sätts innan sluttranskriberingen: kastar den ett fel ska
                 # de redan inskrivna fraserna ändå finnas i "Kopiera
@@ -709,6 +779,53 @@ class App:
             live=live,
         )
 
+    # -- Den lokala poleringstjänsten ----------------------------------------------
+    # Ett valfritt kommando (polish_http_command) som Viska får starta och
+    # stoppa, så att en lokal poleringsserver inte behöver dras igång för hand
+    # vid varje omstart.
+
+    def _service_running(self) -> bool:
+        return self._polish_proc is not None and self._polish_proc.poll() is None
+
+    def _start_service(self, command: str) -> str | None:
+        """Returnerar en felsträng, eller None när tjänsten startade."""
+        if not command:
+            return "Fyll i ett startkommando först."
+        if self._service_running():
+            return None
+        try:
+            # Strängen skickas som den är till CreateProcess (Windows tar
+            # emot en kommandorad, inte en argumentlista) och startas utan
+            # konsolfönster — annars poppar en svart ruta upp vid varje start.
+            self._polish_proc = subprocess.Popen(
+                command,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("Kunde inte starta poleringstjänsten")
+            return f"Kunde inte starta tjänsten: {e}"
+        log.info("Poleringstjänsten startad (pid %s)", self._polish_proc.pid)
+        return None
+
+    def _stop_service(self) -> None:
+        proc, self._polish_proc = self._polish_proc, None
+        if proc is None or proc.poll() is not None:
+            return
+        # taskkill /T tar med barnen. Servern startar i sin tur en egen
+        # app-server-process, och en ensam terminate() hade lämnat den kvar
+        # (det är precis så föräldralösa app-servrar samlas på hög).
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                capture_output=True,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                timeout=10,
+            )
+        except Exception:
+            log.exception("taskkill misslyckades – försöker terminate()")
+            proc.terminate()
+        log.info("Poleringstjänsten stoppad")
+
     # -- Rätta senaste dikteringen (bygger ersättningsregler) -----------------------
 
     def request_correction(self) -> None:
@@ -761,6 +878,13 @@ class App:
         with metrics.Timer() as t:
             polished = self._polish_for_flow(raw, polish_prompt, lang)
         polish_ms = t.ms
+        if polished is CANCELLED:
+            self.overlay.show(
+                "Avbruten – dikteringen finns i historiken",
+                GRAY,
+                auto_hide_ms=2500,
+            )
+            return
         if polished and polished.strip() and polished.strip() != raw.strip():
             self.last_text = polished
             self._remember(polished)  # polerad överst
@@ -788,14 +912,19 @@ class App:
         )
         self.overlay.hide()
 
-    def _polish_for_flow(self, text: str, style: str, lang: str = "sv") -> str | None:
-        """Polerar text med hård tidsgräns. Returnerar den polerade texten,
-        eller None om poleringen är otillgänglig, misslyckas eller tar mer än
-        FLOW_POLISH_TIMEOUT_S sekunder (då skrivs råtexten in)."""
+    def _polish_for_flow(self, text: str, style: str, lang: str = "sv"):
+        """Polerar text medan pillen visar två utvägar: skriv in råtexten nu,
+        eller avbryt. Returnerar den polerade texten, None när råtexten ska
+        skrivas in (fel, tidsgräns eller användarens val) eller CANCELLED.
+
+        Väntan är inte längre en blind join: en polering som tar några sekunder
+        ska gå att hoppa över utan att sitta av tidsgränsen."""
         if not llm.installed(self.cfg):
             return None
-        self.overlay.show("Polerar…", BLUE)
         result: dict[str, str] = {}
+        # Sätts från GUI-tråden när en knapp trycks; läses här.
+        choice: dict[str, str] = {}
+        done = threading.Event()
 
         def work():
             try:
@@ -807,13 +936,30 @@ class App:
                     result["text"] = polisher.polish(text, style, lang)
             except Exception:
                 log.exception("Flow-poleringen misslyckades – skriver in råtext")
+            finally:
+                done.set()
 
-        worker = threading.Thread(
-            target=work, daemon=True, name="viska-flow-polish"
+        self.overlay.show(
+            "Polerar…",
+            BLUE,
+            actions=[
+                ("Skriv in råtext", lambda: choice.setdefault("pick", "raw")),
+                ("Avbryt", lambda: choice.setdefault("pick", "cancel")),
+            ],
         )
-        worker.start()
-        worker.join(timeout=FLOW_POLISH_TIMEOUT_S)
-        if worker.is_alive():
+        threading.Thread(target=work, daemon=True, name="viska-flow-polish").start()
+        deadline = time.monotonic() + FLOW_POLISH_TIMEOUT_S
+        while not done.is_set() and not choice and time.monotonic() < deadline:
+            time.sleep(0.03)
+        # Knapparna bort så att nästa status inte ärver dem.
+        self.overlay.show("Skriver…", BLUE)
+        if choice.get("pick") == "cancel":
+            log.info("Flow-poleringen avbröts av användaren")
+            return CANCELLED
+        if choice.get("pick") == "raw":
+            log.info("Användaren valde råtext i stället för att vänta")
+            return None
+        if not done.is_set():
             # Tråden lever kvar och slutför i tysthet (modellen blir varm till
             # nästa gång) – men vi väntar inte, råtexten skrivs in nu.
             log.warning("Flow-poleringen tog för lång tid – skriver in råtext")
@@ -869,38 +1015,40 @@ class App:
         if self._settings is not None and self._settings.win.winfo_exists():
             self._settings.win.lift()
             return
-        # llm.installed() gör för fjärrbackender en synkron nåbarhetskoll
-        # (2 s HTTP-timeout) på huvudtråden. Kör den EN gång och återanvänd
-        # svaret i både poleringspanelen och polish_ready – annars gjordes
-        # kollen två gånger i rad och hela GUI:t kunde frysa ~4 s vid varje
-        # öppning av Inställningar när Ollama är nere.
-        polish_ready = llm.installed(self.cfg)
+        # Ingen nåbarhetskoll här. Den är ett HTTP-anrop med 2 s timeout, och
+        # på huvudtråden innebar det att en avstängd poleringsserver frös hela
+        # inställningsfönstret innan det ens visades. Fjärrbackender läser i
+        # stället den cachade statusen; fönstret kollar sedan anslutningen i
+        # bakgrunden och uppdaterar sin egen statusrad. builtin är en billig
+        # filkoll och görs direkt.
+        if llm.is_remote(self.cfg):
+            polish_ready = self._remote_reachable
+            threading.Thread(
+                target=self._refresh_remote_reachable, daemon=True
+            ).start()
+        else:
+            polish_ready = llm.installed(self.cfg)
         self._settings = SettingsWindow(
             self.root,
             self.cfg,
             self._apply_settings,
             gpu_panel=self._gpu_panel(),
-            polish_panel=self._polish_panel(polish_ready),
+            polish_panel=self._polish_panel(llm.installed_local(self.cfg)),
             polish_ready=polish_ready,
+            service={
+                "running": self._service_running,
+                "start": self._start_service,
+                "stop": self._stop_service,
+            },
         )
 
     def _polish_panel(self, polish_ready: bool) -> dict:
         if self._llm_busy.is_set():
             return {"state": "Åtgärd pågår…", "kind": "warn", "action": None}
+        # Panelen gäller den INBYGGDA motorn (nedladdning/borttagning).
+        # Fjärrbackendernas status hör hemma i deras egna block i
+        # Inställningar, som kollar anslutningen utan att blockera.
         key = (self.cfg["polish_hotkey"] or "f8").upper()
-        if llm.is_remote(self.cfg):
-            ok = polish_ready  # redan nåbarhetskollat i _open_settings
-            model = llm.remote_model(self.cfg)
-            service = llm.remote_label(self.cfg)
-            return {
-                "state": (
-                    f"via {service} ({model}) – markera text och tryck {key}"
-                    if ok
-                    else f"via {service} ({model}) – tjänsten svarar inte"
-                ),
-                "kind": "ok" if ok else "warn",
-                "action": None,
-            }
         if polish_ready:
             return {
                 "state": f"installerad – markera text och tryck {key}",
@@ -1060,65 +1208,33 @@ class App:
         old = self.cfg
         if changes["hotkey"] == changes["polish_hotkey"]:
             return "Diktering och polering kan inte ha samma tangent."
-        keys_changed = (
-            changes["hotkey"] != old["hotkey"]
-            or changes["hold_threshold_s"] != old["hold_threshold_s"]
-            or changes["polish_hotkey"] != old["polish_hotkey"]
+        keys_changed = any(
+            changes.get(k) != old.get(k)
+            for k in (
+                "hotkey",
+                "hold_threshold_s",
+                "polish_hotkey",
+                "polish_menu_hotkey",
+                "polish_double_tap",
+            )
         )
         if keys_changed:
-            # Atomiskt byte: släpp BÅDA registreringarna först — annars går
-            # det inte att byta plats på tangenterna — registrera nya, och
-            # rulla tillbaka båda om någon misslyckas.
-            if self.hotkey is not None:
-                self.hotkey.stop()
-            if self.polish_key is not None:
-                self.polish_key.stop()
-                self.polish_key = None
-            new_ptt = new_action = None
-            try:
-                new_ptt = create_push_to_talk(
-                    changes["hotkey"],
-                    changes["hold_threshold_s"],
-                    self._on_start,
-                    self._on_stop,
-                )
-                new_action = ActionKey(
-                    changes["polish_hotkey"],
-                    self._on_polish_key,
-                    on_double=self._on_polish_menu,
-                    double_tap_s=POLISH_DOUBLE_TAP_S,
-                )
-            except HotkeyError as e:
-                log.warning("Tangentbyte misslyckades: %s", e)
+            # Atomiskt byte: släpp ALLA registreringar först — annars går det
+            # inte att byta plats på två tangenter — ta de nya, och rulla
+            # tillbaka till de gamla om någon inte går att ta.
+            self._stop_keys()
+            errors = self._bind_keys(changes)
+            if errors:
+                log.warning("Tangentbyte misslyckades: %s", errors[0])
                 if self.icon is not None:
                     try:
-                        self.icon.notify(str(e), "Viska")
+                        self.icon.notify(errors[0], "Viska")
                     except Exception:
                         pass  # tray-notiser är kosmetiska
-                if new_ptt is not None:
-                    new_ptt.stop()
-                self.hotkey = None
-                try:
-                    self.hotkey = create_push_to_talk(
-                        old["hotkey"],
-                        old["hold_threshold_s"],
-                        self._on_start,
-                        self._on_stop,
-                    )
-                except HotkeyError:
-                    log.exception("Kunde inte återta dikteringstangenten")
-                try:
-                    self.polish_key = ActionKey(
-                        old["polish_hotkey"],
-                        self._on_polish_key,
-                        on_double=self._on_polish_menu,
-                        double_tap_s=POLISH_DOUBLE_TAP_S,
-                    )
-                except HotkeyError:
-                    pass  # polering är ett tillval
-                return str(e)
-            self.hotkey = new_ptt
-            self.polish_key = new_action
+                self._stop_keys()
+                for failed in self._bind_keys(old, keep_on_error=True):
+                    log.error("Kunde inte återta den gamla tangenten: %s", failed)
+                return errors[0]
         model_changed = (
             changes["model"] != old["model"]
             or changes["model_en"] != old["model_en"]
@@ -1406,10 +1522,8 @@ class App:
     def quit(self) -> None:
         if self.icon is not None:
             self.icon.stop()
-        if self.hotkey is not None:
-            self.hotkey.stop()
-        if self.polish_key is not None:
-            self.polish_key.stop()
+        self._stop_keys()
+        self._stop_service()
         self.recorder.close()
         self._quit.set()
 
