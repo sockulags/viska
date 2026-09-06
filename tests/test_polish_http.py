@@ -200,3 +200,32 @@ def test_shim_klassar_ovrigt_som_502(shim):
     status, message = shim._classify(RuntimeError("nätverket dog"))
     assert status == 502
     assert message == "nätverket dog"
+
+
+class _FakeStatus:
+    """Som SDK:ns TurnStatus: en enum vars strängform inte är värdet."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __str__(self):
+        return f"TurnStatus.{self.value}"
+
+
+class _FakeResult:
+    def __init__(self, status, error=""):
+        self.status = status
+        self.error = error
+
+
+def test_shim_laser_status_ur_enumen(shim):
+    assert shim._turn_status(_FakeResult(_FakeStatus("completed"))) == "completed"
+    assert shim._turn_status(_FakeResult(_FakeStatus("failed"))) == "failed"
+
+
+def test_shim_tar_ocksa_strangstatus(shim):
+    assert shim._turn_status(_FakeResult("completed")) == "completed"
+
+
+def test_shim_saknad_status_raknas_som_klar(shim):
+    assert shim._turn_status(_FakeResult(None)) == "completed"

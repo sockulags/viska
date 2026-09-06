@@ -112,9 +112,10 @@ class PolishBackend:
             service_tier=self.service_tier,
         )
         result = thread.run(text, effort=self.effort)
-        if getattr(result, "status", "") not in ("completed", "", None):
+        status = _turn_status(result)
+        if status != "completed":
             raise BackendError(
-                f"Codex avslutade turen som {result.status}: "
+                f"Codex avslutade turen som {status}: "
                 f"{getattr(result, 'error', '') or 'ingen förklaring'}"
             )
         answer = (getattr(result, "final_response", "") or "").strip()
@@ -252,6 +253,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args) -> None:
         log.debug(fmt, *args)
+
+
+def _turn_status(result) -> str:
+    """Turens status som ren sträng.
+
+    SDK:n returnerar en enum (TurnStatus.completed), inte "completed" — en
+    rak strängjämförelse gör att varje LYCKAD tur ser ut som ett fel.
+    """
+    status = getattr(result, "status", None)
+    return str(getattr(status, "value", status) or "completed")
 
 
 def _split_messages(messages: list) -> tuple[str, str]:
