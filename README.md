@@ -279,7 +279,7 @@ uv run viska --check
 ```
 
 The application log is written to `%APPDATA%\viska\viska.log`. See the
-[v0.4 release notes](docs/release-notes-v0.4.0.md) for the current feature set.
+[v0.5 release notes](docs/release-notes-v0.5.0.md) for the current feature set.
 
 ## Project status
 
