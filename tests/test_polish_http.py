@@ -229,3 +229,47 @@ def test_shim_tar_ocksa_strangstatus(shim):
 
 def test_shim_saknad_status_raknas_som_klar(shim):
     assert shim._turn_status(_FakeResult(None)) == "completed"
+
+
+# -- Vem som får skriva in text för en diktering -------------------------------
+
+
+def _guard():
+    from viska.app import InsertionGuard
+
+    return InsertionGuard()
+
+
+def test_forsta_anspraket_vinner():
+    guard = _guard()
+    assert guard.claim("polerad") is True
+    assert guard.claim("rå") is False
+    assert guard.winner == "polerad"
+
+
+def test_ratext_infogas_hogst_en_gang():
+    guard = _guard()
+    assert guard.claim("rå") is True
+    assert guard.claim("rå") is False
+
+
+def test_sent_svar_far_inte_infogas_efter_ratext():
+    guard = _guard()
+    guard.claim("rå")
+    assert guard.claim("polerad") is False
+
+
+def test_avbrott_stoppar_all_inskrivning():
+    guard = _guard()
+    guard.cancel()
+    assert guard.cancelled is True
+    assert guard.claim("polerad") is False
+    assert guard.claim("rå") is False
+
+
+def test_avbrott_efter_inskrivning_andrar_inte_vinnaren():
+    guard = _guard()
+    guard.claim("polerad")
+    guard.cancel()
+    assert guard.winner == "polerad"
+    assert guard.cancelled is False

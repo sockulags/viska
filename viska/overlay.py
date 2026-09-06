@@ -15,6 +15,7 @@ Två egenheter att känna till:
 
 import ctypes
 import queue
+import time
 import tkinter as tk
 from tkinter import ttk
 
@@ -84,6 +85,8 @@ class Overlay:
         # Knappar för väntan som går att avbryta (poleringen i flow-läget).
         self._actions = tk.Frame(self._frame, bg=RED)
         self._action_buttons: list[tk.Button] = []
+        self._base_text = ""
+        self._timer_from: float | None = None
         self._recording = False
         self._hide_job = None
         self._poll()
@@ -97,13 +100,18 @@ class Overlay:
         auto_hide_ms: int | None = None,
         meter: bool = False,
         actions: list | None = None,
+        timer: bool = False,
     ):
         """actions: lista av (etikett, callback). Knapparna ritas i pillen och
-        callbacken körs i huvudtråden — håll den kort (sätt en flagga)."""
-        self._queue.put(("show", text, color, auto_hide_ms, meter, actions))
+        callbacken körs i huvudtråden — håll den kort (sätt en flagga).
+
+        timer=True räknar upp sekunderna sedan statusen visades. Under en
+        inspelning är det den enda återkopplingen på hur länge man hållit på;
+        utan den är en glömd växlingsinspelning osynlig."""
+        self._queue.put(("show", text, color, auto_hide_ms, meter, actions, timer))
 
     def hide(self) -> None:
-        self._queue.put(("hide", None, None, None, False, None))
+        self._queue.put(("hide", None, None, None, False, None, False))
 
     # -- Körs i huvudtråden -----------------------------------------------------
 
@@ -111,17 +119,20 @@ class Overlay:
         try:
             while True:
                 (
-                    action, text, color, auto_hide_ms, meter, actions
+                    action, text, color, auto_hide_ms, meter, actions, timer
                 ) = self._queue.get_nowait()
                 if action == "show":
-                    self._show(text, color, auto_hide_ms, meter, actions)
+                    self._show(text, color, auto_hide_ms, meter, actions, timer)
                 else:
                     self._recording = False
+                    self._timer_from = None
                     self._win.withdraw()
         except queue.Empty:
             pass
         if self._recording:
             self._draw_meter()
+        if self._timer_from is not None:
+            self._draw_timer()
         self._root.after(_POLL_MS, self._poll)
 
     def _set_window_styles(self) -> None:
@@ -139,12 +150,15 @@ class Overlay:
         auto_hide_ms: int | None,
         meter: bool,
         actions: list | None = None,
+        timer: bool = False,
     ) -> None:
         if self._hide_job is not None:
             self._root.after_cancel(self._hide_job)
             self._hide_job = None
         for w in (self._frame, self._meter, self._label, self._actions):
             w.config(bg=color)
+        self._base_text = text
+        self._timer_from = time.monotonic() if timer else None
         self._label.config(text=text)
         self._set_actions(actions, color)
         self._recording = meter and self._level_source is not None
@@ -163,6 +177,10 @@ class Overlay:
         self._win.deiconify()
         if auto_hide_ms:
             self._hide_job = self._root.after(auto_hide_ms, self._win.withdraw)
+
+    def _draw_timer(self) -> None:
+        seconds = int(time.monotonic() - (self._timer_from or 0))
+        self._label.config(text=f"{self._base_text}  {seconds // 60}:{seconds % 60:02d}")
 
     def _set_actions(self, actions: list | None, color: str) -> None:
         for button in self._action_buttons:

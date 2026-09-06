@@ -63,9 +63,46 @@ POLISH_DOUBLE_TAP_S = 0.4
 # Sökbredd för flow-lägets förhandsvisning (vanlig diktering behåller sin).
 LIVE_PREVIEW_BEAM = 1
 
-# Användaren tryckte "Avbryt" i pillen medan poleringen pågick: ingenting
-# skrivs in (råtexten finns kvar i historiken).
-CANCELLED = object()
+class InsertionGuard:
+    """Avgör vem som får skriva in text för EN diktering — exakt en vinnare.
+
+    Under en flow-polering finns tre kandidater: den polerade texten, råtexten
+    (användaren orkade inte vänta, eller poleringen tog för lång tid) och
+    ingenting (användaren avbröt). Utan en gemensam vakt är det lätt att få två
+    av dem: ett sent modellsvar som landar efter att råtexten redan skrivits in
+    dubblerar dikteringen i dokumentet, och ett avbrott hinner inte stoppa en
+    inskrivning som redan var på väg.
+
+    Redan inskriven livetext rörs aldrig — den hör till en annan mekanism och
+    ska inte städas bort av ett avbrott.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._winner: str | None = None
+
+    def claim(self, who: str) -> bool:
+        """True bara för den första som gör anspråk. Efter ett avbrott
+        returnerar den alltid False."""
+        with self._lock:
+            if self._winner is not None:
+                return False
+            self._winner = who
+            return True
+
+    def cancel(self) -> None:
+        with self._lock:
+            if self._winner is None:
+                self._winner = "cancelled"
+
+    @property
+    def winner(self) -> str | None:
+        with self._lock:
+            return self._winner
+
+    @property
+    def cancelled(self) -> bool:
+        return self.winner == "cancelled"
 
 
 class App:
@@ -567,7 +604,7 @@ class App:
             )
             self.sounds.start()
             self._set_tray_recording(True)
-            self.overlay.show("Spelar in", RED, meter=True)
+            self.overlay.show("Spelar in", RED, meter=True, timer=True)
             if self._watchdog is not None:  # ska inte hända, men läck aldrig
                 self._watchdog.cancel()
             self._watchdog = threading.Timer(
@@ -661,7 +698,7 @@ class App:
             live, self._live = self._live, None
             audio = self.recorder.stop()
             self._transcribing.set()
-            self.overlay.show("Skriver…", BLUE)
+            self.overlay.show("Transkriberar", BLUE)
             lang = self._session_language
             transcriber = self._session_transcriber
             prompt = self._session_prompt
@@ -859,7 +896,7 @@ class App:
         lang: str = "sv",
         audio_s: float = 0.0,
         transcribe_ms: float = 0.0,
-    ) -> None:
+    ) -> None:  # noqa: PLR0913
         """Polerar hela dikteringen och skriver in resultatet på en gång.
         Körs synkront på transkriberingstråden med _transcribing kvar satt:
         nästa inspelning kan inte starta förrän texten skrivits in, så den
@@ -875,10 +912,17 @@ class App:
         self.last_text = raw
         self._remember(raw)
         self._refresh_tray_menu()
+        guard = InsertionGuard()
         with metrics.Timer() as t:
-            polished = self._polish_for_flow(raw, polish_prompt, lang)
+            polished, reason = self._polish_for_flow(
+                raw, polish_prompt, lang, guard
+            )
         polish_ms = t.ms
-        if polished is CANCELLED:
+        if guard.cancelled:
+            # Avbrutet: ingenting skrivs in för den här dikteringen. Redan
+            # inskriven livetext står kvar — den hör till en annan mekanism
+            # och ska inte städas bort av ett avbrott.
+            log.info("Flow-dikteringen avbröts – ingenting skrevs in")
             self.overlay.show(
                 "Avbruten – dikteringen finns i historiken",
                 GRAY,
@@ -886,19 +930,41 @@ class App:
             )
             return
         if polished and polished.strip() and polished.strip() != raw.strip():
+            if not guard.claim("polerad"):
+                log.info("Poleringen kom efter att något annat skrivits in")
+                self.overlay.hide()
+                return
             self.last_text = polished
             self._remember(polished)  # polerad överst
             self._refresh_tray_menu()
             out = polished
+            done_text = "Klar – polerad"
         else:
+            if not guard.claim("rå"):
+                self.overlay.hide()
+                return
             out = raw
+            done_text = {
+                "råtext vald": "Råtexten infogad",
+                "tidsgräns": "Poleringen svarade inte – råtexten infogad",
+                "fel": "Poleringen misslyckades – råtexten infogad",
+                "otillgänglig": "Poleringen är inte tillgänglig – råtexten infogad",
+            }.get(reason, "Klar – råtexten infogad")
         if self.cfg["append_space"] and not out.endswith("\n"):
             out += " "
         # Poleringen kan ha tagit tid; se till att texten skrivs in i det
         # fönster dikteringen gällde även om fokus hunnit flytta. I normalfallet
-        # (fokus kvar) är det en no-op och ingen fokusstöld sker.
-        if target_hwnd:
-            focus_window(target_hwnd)
+        # (fokus kvar) är det en no-op och ingen fokusstöld sker. Är fönstret
+        # borta skrivs ingenting: att klistra in i vad som råkar ha fokus nu är
+        # värre än att låta texten ligga kvar i historiken.
+        if target_hwnd and not focus_window(target_hwnd):
+            log.warning("Målfönstret finns inte kvar – texten skrivs inte in")
+            self.overlay.show(
+                "Fönstret är borta – texten finns i historiken",
+                GRAY,
+                auto_hide_ms=3000,
+            )
+            return
         with metrics.Timer() as t:
             inject(out, inject_mode, self.cfg["restore_clipboard"])
         metrics.record(
@@ -910,17 +976,27 @@ class App:
             polish_ms=polish_ms,
             flow=True,
         )
-        self.overlay.hide()
+        # Kort kvittens: i flow-läget är det inte självklart VAD som hamnade i
+        # dokumentet. Vanlig diktering säger fortfarande ingenting — där syns
+        # resultatet direkt och pillen ska hålla tyst.
+        self.overlay.show(done_text, GREEN, auto_hide_ms=1600)
 
-    def _polish_for_flow(self, text: str, style: str, lang: str = "sv"):
+    def _polish_for_flow(
+        self, text: str, style: str, lang: str = "sv", guard=None
+    ):
         """Polerar text medan pillen visar två utvägar: skriv in råtexten nu,
-        eller avbryt. Returnerar den polerade texten, None när råtexten ska
-        skrivas in (fel, tidsgräns eller användarens val) eller CANCELLED.
+        eller avbryt. Returnerar den polerade texten, eller None när råtexten
+        ska skrivas in (fel, tidsgräns eller användarens val). Ett avbrott
+        märks på vakten (guard.cancelled), inte på returvärdet.
 
         Väntan är inte längre en blind join: en polering som tar några sekunder
-        ska gå att hoppa över utan att sitta av tidsgränsen."""
+        ska gå att hoppa över utan att sitta av tidsgränsen.
+
+        Returnerar (text, orsak). Orsaken driver statusraden: en råtext som
+        skrivs in för att modellen teg ska säga just det, inte se ut som ett
+        normalt resultat."""
         if not llm.installed(self.cfg):
-            return None
+            return None, "otillgänglig"
         result: dict[str, str] = {}
         # Sätts från GUI-tråden när en knapp trycks; läses här.
         choice: dict[str, str] = {}
@@ -940,31 +1016,35 @@ class App:
                 done.set()
 
         self.overlay.show(
-            "Polerar…",
+            "Polerar",
             BLUE,
             actions=[
-                ("Skriv in råtext", lambda: choice.setdefault("pick", "raw")),
+                ("Infoga råtext", lambda: choice.setdefault("pick", "raw")),
                 ("Avbryt", lambda: choice.setdefault("pick", "cancel")),
             ],
+            timer=True,
         )
         threading.Thread(target=work, daemon=True, name="viska-flow-polish").start()
         deadline = time.monotonic() + FLOW_POLISH_TIMEOUT_S
         while not done.is_set() and not choice and time.monotonic() < deadline:
             time.sleep(0.03)
         # Knapparna bort så att nästa status inte ärver dem.
-        self.overlay.show("Skriver…", BLUE)
+        self.overlay.show("Skriver in", BLUE)
         if choice.get("pick") == "cancel":
             log.info("Flow-poleringen avbröts av användaren")
-            return CANCELLED
+            if guard is not None:
+                guard.cancel()
+            return None, "avbruten"
         if choice.get("pick") == "raw":
             log.info("Användaren valde råtext i stället för att vänta")
-            return None
+            return None, "råtext vald"
         if not done.is_set():
             # Tråden lever kvar och slutför i tysthet (modellen blir varm till
             # nästa gång) – men vi väntar inte, råtexten skrivs in nu.
             log.warning("Flow-poleringen tog för lång tid – skriver in råtext")
-            return None
-        return result.get("text")
+            return None, "tidsgräns"
+        text_out = result.get("text")
+        return text_out, ("polerad" if text_out else "fel")
 
     def _get_polisher(self) -> llm.Polisher:
         with self._polisher_lock:
