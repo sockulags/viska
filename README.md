@@ -29,12 +29,12 @@ Swedish speech recognition uses the Royal Swedish Library's
 separate multilingual Whisper model. Audio and text are processed locally.
 
 <p align="center">
-  <img src="docs/screenshots/settings-general.png" alt="Viska general settings with language, hotkey, live-mode, and quality controls" width="48%">
-  <img src="docs/screenshots/settings-polishing.png" alt="Viska text-polishing settings with reusable writing templates and flow mode" width="48%">
+  <img src="docs/screenshots/settings-dictation.png" alt="Viska dictation settings: language, hotkey, microphone mode, live mode and quality" width="48%">
+  <img src="docs/screenshots/settings-polishing.png" alt="Viska polishing settings: engine, connection status, default style and test area" width="48%">
 </p>
 
-> The current interface is Swedish. The screenshots are captured from the real v0.4
-> settings UI.
+> The current interface is Swedish. The screenshots are captured from the real v0.7
+> settings window.
 
 ## Three ways to work
 
@@ -110,6 +110,7 @@ polishing currently requires the GPU path.
 | Longer dictation | Tap **F9**, then tap again | Starts and stops without holding the key. |
 | Polish selected text | **F8** | Rewrites the current selection using the app's configured template. |
 | Choose a one-off tone | **Shift+F8** | Opens a small menu without changing saved settings. |
+| Skip or abort polishing | Buttons in the status pill | *Insert raw text* writes the dictation as it was; *Cancel* writes nothing. |
 | Switch language | Tray menu | Explicitly switches between Swedish and English; app profiles never change language silently. |
 | Correct the last dictation | Tray menu | Edit the text; the changed words become replacement rules for every future dictation. |
 
@@ -228,13 +229,18 @@ offline. Automatic update checks can be disabled in advanced settings.
 
 ## Configuration
 
-Most settings are available through the four-tab settings window:
+The settings window has five pages in a side menu:
 
-- **General:** language, hotkey, microphone mode, live feel, quality, sounds, and startup
-- **Vocabulary:** global terms, replacement rules, and application-specific profiles
-- **Polishing:** engine (with connection status and a *test polishing* button), global
-  template, template library, Flow mode, and profile overview
-- **Advanced:** model IDs, compute mode, insertion behaviour, privacy controls, and updates
+- **Dictation:** language, hotkey, microphone mode, live behaviour, quality and sounds
+- **Polishing:** engine with connection status, default style, style library, automatic
+  polishing, and a test area that times a sample sentence
+- **App profiles:** how individual programs deviate from the global settings, with every
+  inherited value spelled out
+- **Words and replacements:** vocabulary and replacement rules
+- **Settings:** startup, privacy, models, updates and diagnostics
+
+There is one Save. Anything typed into an editor follows along when you change selection,
+unsaved changes are shown in the footer, and closing with unsaved work asks first.
 
 The configuration file is `%APPDATA%\viska\config.json`. It is created on first launch.
 Useful defaults include:
@@ -283,7 +289,7 @@ uv run viska --check
 ```
 
 The application log is written to `%APPDATA%\viska\viska.log`. See the
-[v0.6 release notes](docs/release-notes-v0.6.0.md) for the current feature set.
+[v0.7 release notes](docs/release-notes-v0.7.0.md) for the current feature set.
 
 ## Project status
 

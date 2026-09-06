@@ -1,6 +1,28 @@
-"""Inställningsfönster med flikar: Allmänt (klarspråk för vardagsbruk),
-Ordlista (global + per app), Polering (poleringsmotor, global standard,
-mallbibliotek och flow) och Avancerat (råa tekniska värden).
+"""Inställningsfönstret: en sidomeny med fem sidor.
+
+Uppdelningen följer vad man faktiskt kommer hit för att göra:
+
+- Diktering: mikrofon, tangenter, språk och livebeteende.
+- Polering: motor, anslutning, standardstil, mallar och en testyta.
+- App-profiler: hur enskilda program avviker från det globala.
+- Ord och ersättningar: ordlista och rättningsregler.
+- Inställningar: autostart, integritet, modeller och felsökning.
+
+App-profilerna låg tidigare inklämda under Ordlista trots att de styr språk,
+inskrivningssätt, polering och flow — nu är de en egen sida där varje fält
+visar vad som ärvs och vad som är överstyrt.
+
+Två saker att känna till:
+
+- ETT sparande. Tidigare fanns "Spara mall" och "Spara profil" bredvid
+  fönstrets "Spara", och det gick inte att se vilken som gällde vad. Nu
+  skrivs redigeringarna in i arbetskopian så fort man byter markering eller
+  lämnar fältet, och fotens Spara är det enda som rör config-filen. Har man
+  osparade ändringar syns det i foten och man varnas innan fönstret stängs.
+
+- Ingenting som kan ta tid får köras på GUI-tråden. Nåbarhetskoller och
+  testpoleringar går i egna trådar och levererar via en kö som huvudtråden
+  tömmer — en nedsläckt poleringstjänst ska inte kunna frysa fönstret.
 
 Skapas och används enbart i huvudtråden — trayn begär öppning via App:s
 UI-kö. Alla färger går via viska.ui: inget får ärva klassiska
@@ -12,7 +34,7 @@ import queue
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk
+from tkinter import messagebox, ttk
 
 from viska import autostart, focus, llm, metrics, ui
 from viska.config import CONFIG_PATH, LOG_PATH
@@ -32,6 +54,21 @@ QUALITY = {
 }
 
 _LIVE_CHOICES = {"Auto (på med GPU)": "auto", "På": True, "Av": False}
+_MIC_CHOICES = {
+    "Vid diktering": "on_demand",
+    "Alltid på": "always",
+    "Stäng direkt": "closed",
+}
+_INJECT_CHOICES = {"Klistra in (standard)": "paste", "Skriv tecken för tecken": "type"}
+
+# Musknappar som går att binda dikteringen till. Vänster och höger saknas
+# medvetet — de behövs för att kunna använda datorn.
+_MOUSE_BUTTONS = {
+    "Mus 4 (tumknapp bakåt)": "mouse4",
+    "Mus 5 (tumknapp framåt)": "mouse5",
+    "Hjulklick": "mouse3",
+}
+
 # Poleringsmotorn i klarspråk. Låg den under Avancerat som "builtin/ollama/
 # http" var den i praktiken osynlig för den som inte redan visste vad den
 # hette — och för en dator utan GPU är den valet som avgör om poleringen
@@ -41,28 +78,11 @@ _ENGINE_CHOICES = {
     "Ollama på den här datorn": "ollama",
     "Egen tjänst (moln eller lokal server)": "http",
 }
-# Mikrofonläge: "Vid diktering" är förvalet — mikrofonikonen i aktivitetsfältet
-# ska bara lysa när Viska faktiskt lyssnar.
-_MIC_CHOICES = {
-    "Vid diktering": "on_demand",
-    "Alltid på": "always",
-    "Stäng direkt": "closed",
-}
-# Musknappar som går att binda dikteringen till. Vänster och höger saknas
-# medvetet — de behövs för att kunna använda datorn.
-_MOUSE_BUTTONS = {
-    "Mus 4 (tumknapp bakåt)": "mouse4",
-    "Mus 5 (tumknapp framåt)": "mouse5",
-    "Hjulklick": "mouse3",
-}
-_INJECT_CHOICES = {"Klistra in (standard)": "paste", "Skriv tecken för tecken": "type"}
-_PROFILE_LANG = {"Samma som aktivt": None, "Svenska": "sv", "Engelska": "en"}
 
-# Poleringsväljarnas specialval (utöver mallnamnen i biblioteket). En app-profil
-# kan ärva den globala standarden; den globala standarden själv kan inte det, så
-# "Global standard" finns bara i per-app-väljaren.
-_GLOBAL_STANDARD = "Global standard"
+# Poleringsväljarnas specialval (utöver mallnamnen i biblioteket).
+_GLOBAL_STANDARD = "Ärv global standard"
 _OWN_TEXT = "Egen text"
+_INHERIT = "Ärv global"
 
 # Tkinter-keysym → vårt tangentnamn (hotkey.parse_hotkey-format).
 _KEYSYMS = {
@@ -81,7 +101,14 @@ _MODIFIER_KEYSYMS = {
     "Alt_L", "Alt_R", "Win_L", "Win_R", "Super_L", "Super_R", "Caps_Lock",
 }
 
-_FIELD_W = 30  # enhetlig fältbredd: lugn högerkant i alla flikar
+_FIELD_W = 30  # enhetlig fältbredd: lugn högerkant på alla sidor
+_PAGES = (
+    "Diktering",
+    "Polering",
+    "App-profiler",
+    "Ord och ersättningar",
+    "Inställningar",
+)
 
 
 class _ActionPanel:
@@ -133,6 +160,54 @@ class _ActionPanel:
             self.win.after(150, self._poll)
 
 
+class _ScrollPage:
+    """En sida som kan bli längre än fönstret. Canvas + inre ram, med hjulet
+    kopplat bara medan pekaren är över sidan (annars skrollar alla sidor
+    samtidigt och listboxar slutar fungera)."""
+
+    def __init__(self, parent):
+        pal = ui.palette()
+        self.outer = tk.Frame(parent, bg=pal["window"])
+        self._canvas = tk.Canvas(
+            self.outer, bg=pal["window"], highlightthickness=0, borderwidth=0
+        )
+        self._bar = ttk.Scrollbar(
+            self.outer, orient="vertical", command=self._canvas.yview
+        )
+        self._canvas.configure(yscrollcommand=self._bar.set)
+        self._canvas.pack(side="left", fill="both", expand=True)
+        self.frame = tk.Frame(self._canvas, bg=pal["window"], padx=18, pady=12)
+        self._window = self._canvas.create_window(
+            (0, 0), window=self.frame, anchor="nw"
+        )
+        self.frame.bind("<Configure>", self._on_frame_configure)
+        self._canvas.bind("<Configure>", self._on_canvas_configure)
+        self.outer.bind("<Enter>", lambda _e: self._bind_wheel())
+        self.outer.bind("<Leave>", lambda _e: self._unbind_wheel())
+
+    def _on_frame_configure(self, _event) -> None:
+        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        needed = self.frame.winfo_reqheight() > self._canvas.winfo_height()
+        if needed and not self._bar.winfo_ismapped():
+            self._bar.pack(side="right", fill="y")
+        elif not needed and self._bar.winfo_ismapped():
+            self._bar.pack_forget()
+
+    def _on_canvas_configure(self, event) -> None:
+        self._canvas.itemconfigure(self._window, width=event.width)
+
+    def _bind_wheel(self) -> None:
+        self._canvas.bind_all("<MouseWheel>", self._on_wheel)
+
+    def _unbind_wheel(self) -> None:
+        self._canvas.unbind_all("<MouseWheel>")
+
+    def _on_wheel(self, event) -> None:
+        if self.frame.winfo_reqheight() <= self._canvas.winfo_height():
+            return
+        self._canvas.yview_scroll(-1 * (event.delta // 120), "units")
+
+
 class SettingsWindow:
     def __init__(
         self,
@@ -146,19 +221,14 @@ class SettingsWindow:
     ):
         """on_save(ändringar: dict) -> None | str (fel visas, fönstret kvar).
         Panelerna kommer från App._gpu_panel()/_polish_panel().
-        polish_ready: True när poleringen är nedladdad/nåbar. Är den inte det
-        visas en hjälptext i stället för flow-lägets kryssrutor — men bara när
-        flow faktiskt är avslaget. Är en kvarglömd flow-flagga på (t.ex. efter
-        att poleringen tagits bort) visas kryssrutan ändå, så att den går att
-        stänga av utan att handredigera config."""
+        polish_ready: True när poleringen är nedladdad/nåbar.
+        service: {"running": () -> bool, "start": (cmd) -> felsträng|None,
+        "stop": ()} för den lokala poleringstjänsten, eller None."""
         ui.refresh_theme()
         self._on_save = on_save
         self._polish_ready = polish_ready
         self._cfg = cfg
-        # {"running": () -> bool, "start": (cmd) -> felsträng|None, "stop": ()}
         self._service = service
-        self._remote_widgets: dict[str, dict] = {}
-        self._remote_queue: queue.Queue = queue.Queue()
         self._orig_model = cfg["model"]
         # Tål handredigerad config: hoppa över trasiga profilposter.
         self._profiles = {
@@ -172,236 +242,34 @@ class SettingsWindow:
         # slås upp här i stället för via listboxens text.
         self._app_order: list[str] = []
         self._capturing = False
+        self._dirty = False
+        self._closing = False
+        # Sant medan fönstret själv fyller i fält (sidbyten, listval,
+        # arv-etiketter). Utan flaggan räknades varje sådan uppdatering som
+        # en ändring, och "Osparade ändringar" tändes av att man bara tittade.
+        self._loading = False
+        self._vars: list[tk.Variable] = []
+        self._texts: list[tk.Text] = []
+        self._remote_widgets: dict[str, dict] = {}
+        self._remote_queue: queue.Queue = queue.Queue()
+        # Räknare som gör att ett avbrutet testsvar aldrig kan hamna i rutan.
+        self._test_token = 0
 
         self.win = tk.Toplevel(root)
         self.win.title("Viska – inställningar")
-        self.win.resizable(False, False)
         self.win.attributes("-topmost", True)
+        self.win.protocol("WM_DELETE_WINDOW", self._on_close)
         self._pal = ui.setup_window(self.win)
         pal = self._pal
+        # Storleken sätts i skärmens egen skala i stället för hårda pixlar, så
+        # att fönstret följer med när Windows förstorar texten.
+        unit = max(1.0, self.win.winfo_fpixels("1i") / 96)
+        self.win.geometry(f"{int(940 * unit)}x{int(660 * unit)}")
+        self.win.minsize(int(760 * unit), int(520 * unit))
 
-        # Arbetskopia av mallbiblioteket, rensad från trasiga poster. Både den
-        # globala väljaren och per-app-väljaren läser namnen härifrån, och
-        # bibliotekseditorn nedan muterar listan — allt sparas via values().
+        # Arbetskopia av mallbiblioteket, rensad från trasiga poster.
         self._templates = [dict(t) for t in llm.polish_templates(cfg)]
         self._selected_template: str | None = None
-        # Skapas här (delas av Polering- och Ordlista-flikarna) i stället för i
-        # en flik, så per-app-editorns ärv-logik alltid har den globala flaggan.
-        self._flow = tk.BooleanVar(value=bool(cfg["flow"]))
-
-        notebook = ttk.Notebook(self.win)
-        notebook.pack(fill="both", expand=True, padx=12, pady=(12, 0))
-        # Ordningen på add-anropen sätter flikordningen: Polering ligger mellan
-        # Ordlista och Avancerat.
-        general = self._tab(notebook, " Allmänt ")
-        wordlist = self._tab(notebook, " Ordlista ")
-        polishing = self._tab(notebook, " Polering ")
-        advanced = self._tab(notebook, " Avancerat ")
-
-        # ---- Allmänt --------------------------------------------------------
-
-        self._language_names = {"sv": "Svenska", "en": "Engelska"}
-        self._language = tk.StringVar(
-            value=self._language_names.get(cfg["language"], "Svenska")
-        )
-        holder = self._row(general, "Språk")
-        ui.Segmented(
-            holder, list(self._language_names.values()), self._language
-        ).frame.pack()
-
-        self._hotkey = tk.StringVar(value=cfg["hotkey"])
-        holder = self._row(
-            general,
-            "Dikteringstangent",
-            hint="Klicka och tryck på tangenten, eller välj en musknapp",
-        )
-        self._hotkey_btn = ttk.Button(
-            holder, text=cfg["hotkey"].upper(), width=20, command=self._capture_hotkey
-        )
-        self._hotkey_btn.pack(side="left")
-        ttk.Button(holder, text="Mus…", width=6, command=self._mouse_menu).pack(
-            side="left", padx=(4, 0)
-        )
-
-        current_feel = next(
-            (
-                name
-                for name, (i, s) in FEELS.items()
-                if abs(i - cfg["live_interval_s"]) < 0.01
-                and abs(s - cfg["live_commit_silence_s"]) < 0.01
-            ),
-            "Egen",
-        )
-        self._feel = tk.StringVar(value=current_feel)
-        feel_options = list(FEELS) + (["Egen"] if current_feel == "Egen" else [])
-        holder = self._row(
-            general, "Livekänsla", hint="Hur snabbt fraser skrivs in vid paus"
-        )
-        ui.Segmented(holder, feel_options, self._feel).frame.pack()
-
-        reverse_live = {v: k for k, v in _LIVE_CHOICES.items()}
-        self._live = tk.StringVar(
-            value=reverse_live.get(cfg["live"], reverse_live["auto"])
-        )
-        holder = self._row(general, "Liveläge")
-        ttk.Combobox(
-            holder, textvariable=self._live, values=list(_LIVE_CHOICES),
-            state="readonly", width=_FIELD_W - 2,
-        ).pack()
-
-        reverse_q = {v: k for k, v in QUALITY.items()}
-        current_q = reverse_q.get(cfg["model"], "Egen (se Avancerat)")
-        q_values = list(QUALITY) + (
-            ["Egen (se Avancerat)"] if current_q not in QUALITY else []
-        )
-        self._quality = tk.StringVar(value=current_q)
-        holder = self._row(general, "Kvalitet (svenska)")
-        ttk.Combobox(
-            holder, textvariable=self._quality, values=q_values,
-            state="readonly", width=_FIELD_W - 2,
-        ).pack()
-
-        reverse_mic = {v: k for k, v in _MIC_CHOICES.items()}
-        self._mic_mode = tk.StringVar(
-            value=reverse_mic.get(cfg["mic_mode"], "Vid diktering")
-        )
-        holder = self._row(
-            general, "Mikrofon", hint="När mikrofonikonen lyser i aktivitetsfältet"
-        )
-        ui.Segmented(holder, list(_MIC_CHOICES), self._mic_mode).frame.pack()
-
-        self._sounds = tk.BooleanVar(value=bool(cfg["sounds"]))
-        holder = self._row(general, "Ljudsignaler")
-        ttk.Checkbutton(holder, variable=self._sounds).pack()
-
-        # Tillståndet läses från Startup-genvägen, inte config — kan
-        # aldrig hamna i osynk med verkligheten.
-        self._autostart = tk.BooleanVar(value=autostart.enabled())
-        holder = self._row(general, "Starta med Windows")
-        ttk.Checkbutton(holder, variable=self._autostart).pack()
-
-        if gpu_panel is not None:
-            ui.section(general, "GPU-stöd")
-            _ActionPanel(general, self.win, gpu_panel)
-
-        # ---- Polering -------------------------------------------------------
-        # Allt poleringsrelaterat samlat: motorstatus/nedladdning, global
-        # standard, mallbibliotek, globalt flow och en översikt.
-        self._build_polishing_tab(polishing, cfg, polish_panel, polish_ready)
-
-        # ---- Ordlista -------------------------------------------------------
-
-        ui.section(wordlist, "Global ordlista")
-        self._hint(
-            wordlist, "Namn och facktermer som ska stavas rätt, t.ex. \"Avanza, Smask\"."
-        )
-        self._prompt = ui.themed_text(wordlist, width=54, height=3, wrap="word")
-        self._prompt.pack(fill="x", pady=(4, 2))
-        self._prompt.insert("1.0", cfg["initial_prompt"])
-
-        ui.section(wordlist, "Per app")
-        self._hint(
-            wordlist, "Extra ordlista och inskrivningssätt när en viss app har fokus."
-        )
-        picker = tk.Frame(wordlist, bg=pal["window"])
-        picker.pack(fill="x", pady=(4, 0))
-        self._app_list = ui.themed_listbox(picker, height=4, exportselection=False)
-        self._app_list.pack(side="left", fill="both", expand=True)
-        self._app_list.bind("<<ListboxSelect>>", self._on_profile_select)
-        buttons = tk.Frame(picker, bg=pal["window"])
-        buttons.pack(side="left", fill="y", padx=(8, 0))
-        ttk.Button(buttons, text="Ny…", width=12, command=self._new_profile).pack(
-            pady=2
-        )
-        ttk.Button(
-            buttons, text="Ta bort", width=12, command=self._remove_profile
-        ).pack(pady=2)
-
-        self._profile_app = tk.StringVar()
-        holder = self._row(wordlist, "App (processnamn)")
-        self._profile_app_box = ttk.Combobox(
-            holder, textvariable=self._profile_app, width=_FIELD_W - 2
-        )
-        self._profile_app_box.pack()
-        holder = self._row(wordlist, "Ordlista för appen")
-        self._profile_prompt = ui.themed_text(holder, width=32, height=2, wrap="word")
-        self._profile_prompt.pack()
-        reverse_inject = {v: k for k, v in _INJECT_CHOICES.items()}
-        self._profile_inject = tk.StringVar(value=list(_INJECT_CHOICES)[0])
-        holder = self._row(wordlist, "Inskrivning")
-        ttk.Combobox(
-            holder, textvariable=self._profile_inject,
-            values=list(_INJECT_CHOICES), state="readonly", width=_FIELD_W - 2,
-        ).pack()
-        self._profile_lang = tk.StringVar(value=list(_PROFILE_LANG)[0])
-        holder = self._row(wordlist, "Språk i appen", hint="Byts aldrig automatiskt")
-        ttk.Combobox(
-            holder, textvariable=self._profile_lang,
-            values=list(_PROFILE_LANG), state="readonly", width=_FIELD_W - 2,
-        ).pack()
-        # Poleringsuppgift för appen: Global standard (ärv), en mall ur
-        # biblioteket eller Egen text (fritext, dagens polish_prompt). Combobox
-        # + textfält som bara visas för Egen text. Samma bibliotek som den
-        # globala väljaren i Polering-fliken.
-        polish_box = tk.Frame(wordlist, bg=pal["window"])
-        polish_box.pack(fill="x")
-        self._profile_polish_choice = tk.StringVar(value=_GLOBAL_STANDARD)
-        holder = self._row(
-            polish_box, "Polering", hint="Uppgift när appens text poleras"
-        )
-        self._profile_polish_combo = ttk.Combobox(
-            holder,
-            textvariable=self._profile_polish_choice,
-            values=[_GLOBAL_STANDARD] + self._template_names() + [_OWN_TEXT],
-            state="readonly",
-            width=_FIELD_W - 2,
-        )
-        self._profile_polish_combo.pack()
-        self._profile_polish_combo.bind(
-            "<<ComboboxSelected>>", lambda _e: self._toggle_profile_polish_text()
-        )
-        self._profile_polish = ui.themed_text(
-            polish_box, width=54, height=2, wrap="word"
-        )
-        # Packas först när Egen text väljs (_toggle_profile_polish_text).
-        # Flow-läge per app. Var:n skapas alltid (och laddas/sparas) så att en
-        # befintlig profil behåller sitt flow-val även när kryssrutan är dold.
-        # Startvärdet är den globala standarden: en profil utan eget val ärver
-        # den och sparas utan egen flow-nyckel (se _save_profile).
-        self._profile_flow = tk.BooleanVar(value=bool(cfg["flow"]))
-        # Visa kryssrutan när poleringen är nedladdad ELLER när någon profil
-        # redan har flow på: annars går en kvarglömd flow-flagga i en profil
-        # (efter t.ex. "Ta bort poleringen") inte att stänga av härifrån.
-        any_profile_flow = any(p.get("flow") for p in self._profiles.values())
-        if polish_ready or any_profile_flow:
-            holder = self._row(
-                wordlist, "Flow-läge", hint="Polera dikteringen automatiskt"
-            )
-            ttk.Checkbutton(holder, variable=self._profile_flow).pack()
-            if not polish_ready:
-                self._hint(
-                    wordlist,
-                    "Poleringen är inte nedladdad – flow-läget gör inget "
-                    "tills den laddats ner.",
-                )
-        else:
-            self._hint(
-                wordlist,
-                "Flow-läge (automatisk polering) blir tillgängligt när "
-                "poleringen laddats ner.",
-            )
-        ttk.Button(
-            wordlist, text="Spara profil", command=self._save_profile
-        ).pack(anchor="e", pady=(6, 0))
-        self._reverse_inject = reverse_inject
-        self._refresh_profile_list()
-
-        ui.section(wordlist, "Ersättningsregler")
-        self._hint(
-            wordlist,
-            "Ord Whisper hör fel skrivs alltid rätt. Fylls enklast på via\n"
-            "\"Rätta senaste dikteringen…\" i traymenyn.",
-        )
         stored_replacements = cfg["replacements"]
         self._replacements = (
             {
@@ -413,31 +281,614 @@ class SettingsWindow:
             else {}
         )
         self._repl_order: list[str] = []
-        repl_box = tk.Frame(wordlist, bg=pal["window"])
+        # Skapas tidigt: både Polering och App-profiler läser den globala
+        # flow-flaggan för att kunna visa vad en profil ärver.
+        self._flow = self._var(tk.BooleanVar, value=bool(cfg["flow"]))
+        self._inject = self._var(
+            tk.StringVar,
+            value={v: k for k, v in _INJECT_CHOICES.items()}.get(
+                cfg["inject_mode"], list(_INJECT_CHOICES)[0]
+            ),
+        )
+        self._language_names = {"sv": "Svenska", "en": "Engelska"}
+        self._language = self._var(
+            tk.StringVar, value=self._language_names.get(cfg["language"], "Svenska")
+        )
+
+        body = tk.Frame(self.win, bg=pal["window"])
+        body.pack(fill="both", expand=True)
+        self._build_sidebar(body)
+        self._content = tk.Frame(body, bg=pal["window"])
+        self._content.pack(side="left", fill="both", expand=True)
+
+        self._pages: dict[str, _ScrollPage] = {}
+        for name in _PAGES:
+            self._pages[name] = _ScrollPage(self._content)
+        self._build_dictation(self._pages["Diktering"].frame, cfg)
+        self._build_polishing(
+            self._pages["Polering"].frame, cfg, polish_panel, polish_ready
+        )
+        self._build_profiles(self._pages["App-profiler"].frame, cfg)
+        self._build_words(self._pages["Ord och ersättningar"].frame, cfg)
+        self._build_advanced(self._pages["Inställningar"].frame, cfg, gpu_panel)
+
+        self._build_footer()
+        self._select_page(_PAGES[0])
+        self._watch_changes()
+        self._poll_remote()
+
+    # -- Ram och navigering --------------------------------------------------------
+
+    def _var(self, kind, **kwargs):
+        variable = kind(**kwargs)
+        self._vars.append(variable)
+        return variable
+
+    def _build_sidebar(self, parent) -> None:
+        pal = self._pal
+        bar = tk.Frame(parent, bg=pal["surface"], width=190)
+        bar.pack(side="left", fill="y")
+        bar.pack_propagate(False)
+        tk.Label(
+            bar, text="VISKA", bg=pal["surface"], fg=pal["muted"],
+            font=("Segoe UI", 9, "bold"), anchor="w", padx=16, pady=14,
+        ).pack(fill="x")
+        self._nav_items: dict[str, tk.Label] = {}
+        for name in _PAGES:
+            item = tk.Label(
+                bar, text=name, bg=pal["surface"], fg=pal["text"],
+                font=("Segoe UI", 10), anchor="w", padx=16, pady=9, cursor="hand2",
+            )
+            item.pack(fill="x")
+            item.bind("<Button-1>", lambda _e, n=name: self._select_page(n))
+            self._nav_items[name] = item
+
+    def _select_page(self, name: str) -> None:
+        pal = self._pal
+        for page_name, page in self._pages.items():
+            if page_name == name:
+                page.outer.pack(fill="both", expand=True)
+            else:
+                page.outer.pack_forget()
+        for item_name, item in self._nav_items.items():
+            selected = item_name == name
+            item.config(
+                bg=pal["accent"] if selected else pal["surface"],
+                fg=pal["accent_fg"] if selected else pal["text"],
+                font=("Segoe UI", 10, "bold" if selected else "normal"),
+            )
+        self._current_page = name
+        if name == "Polering":
+            self._show_engine_block()
+        elif name == "App-profiler":
+            self._refresh_inherit_labels()
+
+    def _build_footer(self) -> None:
+        pal = self._pal
+        footer = tk.Frame(self.win, bg=pal["window"])
+        footer.pack(fill="x", padx=18, pady=(6, 14))
+        self._error = tk.Label(
+            footer, text="", bg=pal["window"], fg="#e24b4a",
+            font=("Segoe UI", 8), anchor="w", justify="left", wraplength=460,
+        )
+        self._error.pack(side="left")
+        ttk.Button(footer, text="Avbryt", command=self._on_close).pack(side="right")
+        ttk.Button(
+            footer, text="Spara", command=self._save, style="Accent.TButton"
+        ).pack(side="right", padx=(0, 6))
+        self._dirty_label = tk.Label(
+            footer, text="", bg=pal["window"], fg=pal["muted"],
+            font=("Segoe UI", 8), anchor="e",
+        )
+        self._dirty_label.pack(side="right", padx=(0, 12))
+
+    # -- Osparade ändringar --------------------------------------------------------
+
+    def _watch_changes(self) -> None:
+        """Kopplas in EFTER att sidorna byggts, annars räknas uppbyggnaden
+        själv som ändringar."""
+        for variable in self._vars:
+            variable.trace_add("write", lambda *_a: self._mark_dirty())
+        for text in self._texts:
+            text.edit_modified(False)
+            text.bind("<<Modified>>", self._on_text_modified, add="+")
+
+    def _on_text_modified(self, event) -> None:
+        if event.widget.edit_modified():
+            event.widget.edit_modified(False)
+            self._mark_dirty()
+
+    def _mark_dirty(self) -> None:
+        if self._closing or self._loading:
+            return
+        self._dirty = True
+        self._dirty_label.config(text="Osparade ändringar")
+
+    def _on_close(self) -> None:
+        if not self._dirty:
+            self._closing = True
+            self.win.destroy()
+            return
+        answer = messagebox.askyesnocancel(
+            "Osparade ändringar",
+            "Du har ändringar som inte är sparade. Spara dem?",
+            parent=self.win,
+        )
+        if answer is None:
+            return  # avbryt stängningen
+        if answer:
+            self._save()
+            return
+        self._closing = True
+        self.win.destroy()
+
+    # -- Sida: Diktering -----------------------------------------------------------
+
+    def _build_dictation(self, parent, cfg) -> None:
+        self._heading(parent, "Diktering", "Håll tangenten, prata, släpp.")
+
+        holder = self._row(parent, "Språk")
+        ui.Segmented(
+            holder, list(self._language_names.values()), self._language
+        ).frame.pack()
+
+        self._hotkey = self._var(tk.StringVar, value=cfg["hotkey"])
+        holder = self._row(
+            parent,
+            "Dikteringstangent",
+            hint="Klicka och tryck på tangenten, eller välj en musknapp",
+        )
+        self._hotkey_btn = ttk.Button(
+            holder, text=cfg["hotkey"].upper(), width=18, command=self._capture_hotkey
+        )
+        self._hotkey_btn.pack(side="left")
+        ttk.Button(holder, text="Mus…", width=6, command=self._mouse_menu).pack(
+            side="left", padx=(4, 0)
+        )
+
+        reverse_mic = {v: k for k, v in _MIC_CHOICES.items()}
+        self._mic_mode = self._var(
+            tk.StringVar, value=reverse_mic.get(cfg["mic_mode"], "Vid diktering")
+        )
+        holder = self._row(
+            parent, "Mikrofon", hint="När mikrofonikonen lyser i aktivitetsfältet"
+        )
+        ui.Segmented(holder, list(_MIC_CHOICES), self._mic_mode).frame.pack()
+
+        reverse_live = {v: k for k, v in _LIVE_CHOICES.items()}
+        self._live = self._var(
+            tk.StringVar, value=reverse_live.get(cfg["live"], reverse_live["auto"])
+        )
+        holder = self._row(
+            parent,
+            "Visa text medan jag talar",
+            hint="Färdiga fraser skrivs in vid pauserna",
+        )
+        ttk.Combobox(
+            holder, textvariable=self._live, values=list(_LIVE_CHOICES),
+            state="readonly", width=_FIELD_W - 2,
+        ).pack()
+
+        current_feel = next(
+            (
+                name
+                for name, (i, s) in FEELS.items()
+                if abs(i - cfg["live_interval_s"]) < 0.01
+                and abs(s - cfg["live_commit_silence_s"]) < 0.01
+            ),
+            "Egen",
+        )
+        self._feel = self._var(tk.StringVar, value=current_feel)
+        feel_options = list(FEELS) + (["Egen"] if current_feel == "Egen" else [])
+        holder = self._row(
+            parent, "Livekänsla", hint="Hur snabbt fraser skrivs in vid paus"
+        )
+        ui.Segmented(holder, feel_options, self._feel).frame.pack()
+
+        reverse_q = {v: k for k, v in QUALITY.items()}
+        current_q = reverse_q.get(cfg["model"], "Egen (se Inställningar)")
+        q_values = list(QUALITY) + (
+            ["Egen (se Inställningar)"] if current_q not in QUALITY else []
+        )
+        self._quality = self._var(tk.StringVar, value=current_q)
+        holder = self._row(parent, "Kvalitet (svenska)")
+        ttk.Combobox(
+            holder, textvariable=self._quality, values=q_values,
+            state="readonly", width=_FIELD_W - 2,
+        ).pack()
+
+        self._sounds = self._var(tk.BooleanVar, value=bool(cfg["sounds"]))
+        holder = self._row(parent, "Ljudsignaler")
+        ttk.Checkbutton(holder, variable=self._sounds).pack()
+
+        ui.section(parent, "Mikrofonen")
+        self._mic_info = tk.Label(
+            parent, text="", bg=self._pal["window"], fg=self._pal["muted"],
+            font=("Segoe UI", 8), anchor="w", justify="left",
+        )
+        self._mic_info.pack(fill="x")
+        ttk.Button(
+            parent, text="Kontrollera mikrofonen", command=self._refresh_mic_info
+        ).pack(anchor="w", pady=(4, 0))
+        self._refresh_mic_info()
+
+    def _refresh_mic_info(self) -> None:
+        """Vilken mikrofon Windows skulle välja just nu. Ren avläsning i en
+        egen tråd — PortAudio kan ta hundratals millisekunder på sig."""
+
+        def work():
+            try:
+                import sounddevice as sd
+
+                default = sd.query_devices(kind="input")
+                text = f"Standardmikrofon: {default['name']}"
+            except Exception as e:  # noqa: BLE001
+                text = f"Ingen mikrofon hittades ({e})"
+            self._remote_queue.put(("mic", "text", text))
+
+        self._mic_info.config(text="Läser enheter…")
+        threading.Thread(target=work, daemon=True, name="viska-micinfo").start()
+
+    # -- Sida: Polering ------------------------------------------------------------
+
+    def _build_polishing(self, parent, cfg, polish_panel, polish_ready) -> None:
+        pal = self._pal
+        self._heading(
+            parent,
+            "Polering",
+            "Markera text och tryck poleringstangenten, eller låt hela "
+            "dikteringar poleras automatiskt.",
+        )
+
+        reverse_engine = {v: k for k, v in _ENGINE_CHOICES.items()}
+        self._engine = self._var(
+            tk.StringVar,
+            value=reverse_engine.get(cfg["polish_backend"], list(_ENGINE_CHOICES)[0]),
+        )
+        holder = self._row(parent, "Motor", hint="Var omskrivningen körs")
+        engine_combo = ttk.Combobox(
+            holder, textvariable=self._engine, values=list(_ENGINE_CHOICES),
+            state="readonly", width=_FIELD_W - 2,
+        )
+        engine_combo.pack()
+        engine_combo.bind("<<ComboboxSelected>>", lambda _e: self._show_engine_block())
+
+        # Motorns egna fält hör ihop med väljaren och måste ligga DIREKT under
+        # den. Utan en egen behållare hamnade de sist på sidan, eftersom pack()
+        # lägger till i slutet och resten av sidan byggs efter det här.
+        self._engine_area = tk.Frame(parent, bg=pal["window"])
+        self._engine_area.pack(fill="x")
+        parent = self._engine_area
+        self._engine_blocks: dict[str, tk.Frame] = {}
+
+        block = tk.Frame(parent, bg=pal["window"])
+        self._engine_blocks["builtin"] = block
+        if polish_panel is not None:
+            _ActionPanel(block, self.win, polish_panel)
+
+        block = tk.Frame(parent, bg=pal["window"])
+        self._engine_blocks["ollama"] = block
+        self._ollama_model = self._var(tk.StringVar, value=cfg["polish_ollama_model"])
+        holder = self._row(block, "Modell i Ollama")
+        ttk.Entry(holder, textvariable=self._ollama_model, width=_FIELD_W).pack()
+        self._ollama_url = self._var(tk.StringVar, value=cfg["polish_ollama_url"])
+        holder = self._row(block, "Ollamas adress")
+        ttk.Entry(holder, textvariable=self._ollama_url, width=_FIELD_W).pack()
+        self._build_remote_tools(block, "ollama")
+
+        block = tk.Frame(parent, bg=pal["window"])
+        self._engine_blocks["http"] = block
+        self._http_url = self._var(tk.StringVar, value=cfg["polish_http_url"])
+        holder = self._row(block, "Tjänstens adress")
+        ttk.Entry(holder, textvariable=self._http_url, width=_FIELD_W).pack()
+        self._http_model = self._var(tk.StringVar, value=cfg["polish_http_model"])
+        holder = self._row(block, "Modell i tjänsten")
+        ttk.Entry(holder, textvariable=self._http_model, width=_FIELD_W).pack()
+        self._http_token = self._var(
+            tk.StringVar, value=str(cfg.get("polish_http_token") or "")
+        )
+        holder = self._row(block, "Nyckel", hint="Tom = ingen Authorization-header")
+        ttk.Entry(
+            holder, textvariable=self._http_token, width=_FIELD_W, show="•"
+        ).pack()
+        self._http_command = self._var(
+            tk.StringVar, value=str(cfg.get("polish_http_command") or "")
+        )
+        holder = self._row(
+            block, "Startkommando", hint="Lokal server som Viska får starta"
+        )
+        ttk.Entry(holder, textvariable=self._http_command, width=_FIELD_W).pack()
+        self._build_service_row(block)
+        ui.status_card(
+            block,
+            "warn",
+            "Texten lämnar datorn",
+            "Med den här motorn skickas det som ska poleras till adressen "
+            "ovan. Allt annat i Viska stannar lokalt.",
+        ).pack(fill="x", pady=(8, 2))
+        self._build_remote_tools(block, "http")
+
+        # -- Standardstil ------------------------------------------------------
+        parent = self._engine_area.master
+        ui.section(parent, "Standardstil")
+        self._hint(
+            parent,
+            "Uppgiften som gäller överallt utom där en app har en egen "
+            "(se App-profiler).",
+        )
+        names = self._template_names()
+        stored = (cfg.get("polish_template") or "").strip()
+        initial = stored if stored in names else _OWN_TEXT
+        self._global_polish_choice = self._var(tk.StringVar, value=initial)
+        gbox = tk.Frame(parent, bg=pal["window"])
+        gbox.pack(fill="x", pady=(2, 0))
+        self._global_polish_combo = ttk.Combobox(
+            gbox, textvariable=self._global_polish_choice,
+            values=[_OWN_TEXT] + names, state="readonly", width=_FIELD_W - 2,
+        )
+        self._global_polish_combo.pack(anchor="w")
+        self._global_polish_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: self._toggle_global_polish_text()
+        )
+        self._polish_prompt = self._text(gbox, height=3)
+        self._polish_prompt.insert("1.0", cfg["polish_prompt"])
+        self._toggle_global_polish_text()  # visar textfältet bara för Egen text
+
+        holder = self._row(
+            parent,
+            "Polera automatiskt",
+            hint="Hela dikteringen poleras innan den skrivs in",
+        )
+        ttk.Checkbutton(holder, variable=self._flow).pack()
+        if not polish_ready:
+            self._hint(
+                parent,
+                "Poleringen är inte tillgänglig ännu – tills den är det skrivs "
+                "dikteringen in som vanligt.",
+            )
+
+        # -- Mallbibliotek -----------------------------------------------------
+        ui.section(parent, "Stilar")
+        self._hint(
+            parent,
+            "Mallar som standardstilen och app-profilerna pekar på. Ändras en "
+            "mall slår det igenom överallt där den används. Redigeringen "
+            "sparas med fönstrets Spara.",
+        )
+        picker = tk.Frame(parent, bg=pal["window"])
+        picker.pack(fill="x", pady=(4, 0))
+        self._template_list = ui.themed_listbox(
+            picker, height=6, exportselection=False
+        )
+        self._template_list.pack(side="left", fill="both", expand=True)
+        self._template_list.bind("<<ListboxSelect>>", self._on_template_select)
+        tbtns = tk.Frame(picker, bg=pal["window"])
+        tbtns.pack(side="left", fill="y", padx=(8, 0))
+        ttk.Button(tbtns, text="Ny stil", width=12, command=self._new_template).pack(
+            pady=2
+        )
+        ttk.Button(
+            tbtns, text="Ta bort", width=12, command=self._remove_template
+        ).pack(pady=2)
+        self._template_name = self._var(tk.StringVar)
+        holder = self._row(parent, "Namn")
+        self._template_name_entry = ttk.Entry(
+            holder, textvariable=self._template_name, width=_FIELD_W
+        )
+        self._template_name_entry.pack()
+        self._template_name_entry.bind("<FocusOut>", lambda _e: self._commit_template())
+        self._hint(parent, "Uppgift till modellen")
+        self._template_prompt = self._text(parent, height=6)
+        self._template_prompt.bind("<FocusOut>", lambda _e: self._commit_template())
+        self._refresh_template_list()
+
+        # -- Testyta -----------------------------------------------------------
+        ui.section(parent, "Testa")
+        self._hint(
+            parent,
+            "Kör en mening genom motorn och stilen som är vald här — även om "
+            "de inte är sparade än. Resultatet stannar i rutan: det skrivs "
+            "inte in någonstans och rör inte klippbordet.",
+        )
+        self._test_sample = self._text(parent, height=3)
+        self._test_sample.insert("1.0", cfg.get("polish_test_text", ""))
+        test_row = tk.Frame(parent, bg=pal["window"])
+        test_row.pack(fill="x", pady=(4, 0))
+        self._test_button = ttk.Button(
+            test_row, text="Testa polering", command=self._run_test
+        )
+        self._test_button.pack(side="left")
+        self._test_cancel = ttk.Button(
+            test_row, text="Avbryt test", command=self._cancel_test, state="disabled"
+        )
+        self._test_cancel.pack(side="left", padx=(6, 0))
+        self._test_time = tk.Label(
+            test_row, text="", bg=pal["window"], fg=pal["muted"],
+            font=("Segoe UI", 8),
+        )
+        self._test_time.pack(side="left", padx=(10, 0))
+        self._test_result = self._text(parent, height=5, editable=False)
+        # Blocken packas redan här, inte först när sidan besöks: motorns status
+        # ska vara känd även för den som sparar utan att gå hit.
+        self._show_engine_block()
+
+    # -- Sida: App-profiler --------------------------------------------------------
+
+    def _build_profiles(self, parent, cfg) -> None:
+        pal = self._pal
+        self._heading(
+            parent,
+            "App-profiler",
+            "Hur ett enskilt program avviker från det globala. Fält som står "
+            "på \"Ärv global\" följer inställningarna på de andra sidorna.",
+        )
+        picker = tk.Frame(parent, bg=pal["window"])
+        picker.pack(fill="x")
+        self._app_list = ui.themed_listbox(picker, height=6, exportselection=False)
+        self._app_list.pack(side="left", fill="both", expand=True)
+        self._app_list.bind("<<ListboxSelect>>", self._on_profile_select)
+        buttons = tk.Frame(picker, bg=pal["window"])
+        buttons.pack(side="left", fill="y", padx=(8, 0))
+        ttk.Button(
+            buttons, text="Ny profil", width=12, command=self._new_profile
+        ).pack(pady=2)
+        ttk.Button(
+            buttons, text="Ta bort", width=12, command=self._remove_profile
+        ).pack(pady=2)
+
+        self._profile_app = self._var(tk.StringVar)
+        holder = self._row(parent, "Program", hint="Processnamn, t.ex. code.exe")
+        self._profile_app_box = ttk.Combobox(
+            holder, textvariable=self._profile_app, width=_FIELD_W - 2
+        )
+        self._profile_app_box.pack()
+        self._profile_app_box.bind("<FocusOut>", lambda _e: self._commit_profile())
+
+        self._hint(parent, "Extra ordlista för appen")
+        self._profile_prompt = self._text(parent, height=3)
+        self._profile_prompt.bind("<FocusOut>", lambda _e: self._commit_profile())
+
+        self._profile_lang = self._var(tk.StringVar, value=_INHERIT)
+        holder = self._row(parent, "Språk", hint="Byts aldrig automatiskt")
+        self._profile_lang_combo = ttk.Combobox(
+            holder, textvariable=self._profile_lang, state="readonly",
+            width=_FIELD_W - 2,
+        )
+        self._profile_lang_combo.pack()
+
+        self._profile_inject = self._var(tk.StringVar, value=_INHERIT)
+        holder = self._row(parent, "Inskrivning")
+        self._profile_inject_combo = ttk.Combobox(
+            holder, textvariable=self._profile_inject, state="readonly",
+            width=_FIELD_W - 2,
+        )
+        self._profile_inject_combo.pack()
+
+        self._profile_polish_choice = self._var(tk.StringVar, value=_GLOBAL_STANDARD)
+        holder = self._row(parent, "Poleringsstil")
+        self._profile_polish_combo = ttk.Combobox(
+            holder, textvariable=self._profile_polish_choice, state="readonly",
+            width=_FIELD_W - 2,
+        )
+        self._profile_polish_combo.pack()
+        self._profile_polish_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: self._toggle_profile_polish_text()
+        )
+        self._profile_polish = self._text(parent, height=3)
+
+        self._profile_flow = self._var(tk.StringVar, value=_INHERIT)
+        holder = self._row(parent, "Polera automatiskt")
+        self._profile_flow_combo = ttk.Combobox(
+            holder, textvariable=self._profile_flow, state="readonly",
+            width=_FIELD_W - 2,
+        )
+        self._profile_flow_combo.pack()
+
+        ui.section(parent, "Översikt")
+        self._polish_overview = tk.Label(
+            parent, text="", bg=pal["window"], fg=pal["muted"],
+            font=("Segoe UI", 8), anchor="w", justify="left",
+        )
+        self._polish_overview.pack(fill="x")
+        self._refresh_inherit_labels()
+        self._refresh_profile_list()
+        self._set_profile_editor(None)
+
+    def _refresh_inherit_labels(self) -> None:
+        """Väljarna visar vad som ärvs, med det globala värdet i klartext —
+        annars går det inte att se vad "ärv" faktiskt betyder just nu."""
+        keep_lang = self._profile_lang.get()
+        keep_inject = self._profile_inject.get()
+        keep_flow = self._profile_flow.get()
+        # Kort form av det globala värdet: hela etiketten hade gett
+        # "Ärv global (Klistra in (standard))", parentes i parentes.
+        inject_short = {
+            "paste": "klistra in", "type": "tecken för tecken"
+        }[_INJECT_CHOICES[self._inject.get()]]
+        was_loading, self._loading = self._loading, True
+        try:
+            self._profile_lang_combo.config(
+                values=[
+                    f"{_INHERIT} ({self._language.get().lower()})",
+                    "Svenska",
+                    "Engelska",
+                ]
+            )
+            self._profile_inject_combo.config(
+                values=[f"{_INHERIT} ({inject_short})"] + list(_INJECT_CHOICES)
+            )
+            self._profile_polish_combo.config(
+                values=[_GLOBAL_STANDARD] + self._template_names() + [_OWN_TEXT]
+            )
+            self._profile_flow_combo.config(
+                values=[
+                    f"{_INHERIT} ({'på' if self._flow.get() else 'av'})", "På", "Av"
+                ]
+            )
+            # Behåll valet men följ med i den nya arv-etiketten.
+            for var, keep, combo in (
+                (self._profile_lang, keep_lang, self._profile_lang_combo),
+                (self._profile_inject, keep_inject, self._profile_inject_combo),
+                (self._profile_flow, keep_flow, self._profile_flow_combo),
+            ):
+                if self._inherit_value(keep):
+                    var.set(combo.cget("values")[0])
+                else:
+                    var.set(keep)
+        finally:
+            self._loading = was_loading
+
+    @staticmethod
+    def _inherit_value(combo_value: str) -> bool:
+        return str(combo_value).startswith(_INHERIT)
+
+    # -- Sida: Ord och ersättningar ------------------------------------------------
+
+    def _build_words(self, parent, cfg) -> None:
+        pal = self._pal
+        self._heading(
+            parent, "Ord och ersättningar", "Namn och facktermer som ska bli rätt."
+        )
+        ui.section(parent, "Ordlista")
+        self._hint(
+            parent,
+            "Ett tips till modellen om hur ord stavas, t.ex. \"Avanza, Smask\". "
+            "Den följs inte alltid.",
+        )
+        self._prompt = self._text(parent, height=3)
+        self._prompt.insert("1.0", cfg["initial_prompt"])
+
+        ui.section(parent, "Ersättningsregler")
+        self._hint(
+            parent,
+            "Körs efter transkriberingen och slår alltid igenom. Fylls enklast "
+            "på via \"Rätta senaste dikteringen…\" i traymenyn.",
+        )
+        repl_box = tk.Frame(parent, bg=pal["window"])
         repl_box.pack(fill="x", pady=(4, 0))
-        self._repl_list = ui.themed_listbox(repl_box, height=4, exportselection=False)
+        self._repl_list = ui.themed_listbox(repl_box, height=6, exportselection=False)
         self._repl_list.pack(side="left", fill="both", expand=True)
         repl_buttons = tk.Frame(repl_box, bg=pal["window"])
         repl_buttons.pack(side="left", fill="y", padx=(8, 0))
         ttk.Button(
             repl_buttons, text="Ta bort", width=12, command=self._remove_replacement
         ).pack(pady=2)
-        repl_add = tk.Frame(wordlist, bg=pal["window"])
+        repl_add = tk.Frame(parent, bg=pal["window"])
         repl_add.pack(fill="x", pady=(6, 0))
-        self._repl_heard = tk.StringVar()
-        self._repl_write = tk.StringVar()
+        self._repl_heard = self._var(tk.StringVar)
+        self._repl_write = self._var(tk.StringVar)
         tk.Label(
             repl_add, text="Hör", bg=pal["window"], fg=pal["text"],
             font=("Segoe UI", 9),
         ).pack(side="left")
-        ttk.Entry(repl_add, textvariable=self._repl_heard, width=16).pack(
+        ttk.Entry(repl_add, textvariable=self._repl_heard, width=18).pack(
             side="left", padx=(6, 6)
         )
         tk.Label(
             repl_add, text="skriv", bg=pal["window"], fg=pal["text"],
             font=("Segoe UI", 9),
         ).pack(side="left")
-        ttk.Entry(repl_add, textvariable=self._repl_write, width=16).pack(
+        ttk.Entry(repl_add, textvariable=self._repl_write, width=18).pack(
             side="left", padx=(6, 6)
         )
         ttk.Button(repl_add, text="Lägg till", command=self._add_replacement).pack(
@@ -445,31 +896,85 @@ class SettingsWindow:
         )
         self._refresh_replacements()
 
-        ui.section(wordlist, "Röstkommandon")
+        ui.section(parent, "Röstkommandon")
         self._hint(
-            wordlist,
+            parent,
             "Säg \"ny rad\" eller \"nytt stycke\" så skrivs radbrytning i stället.\n"
             "Fraserna redigeras under voice_commands i config-filen.",
         )
 
-        # ---- Avancerat ------------------------------------------------------
+    # -- Sida: Inställningar -------------------------------------------------------
+
+    def _build_advanced(self, parent, cfg, gpu_panel) -> None:
+        pal = self._pal
+        self._heading(parent, "Inställningar", "Start, integritet och modeller.")
+
+        # Tillståndet läses från Startup-genvägen, inte config — kan
+        # aldrig hamna i osynk med verkligheten.
+        self._autostart = self._var(tk.BooleanVar, value=autostart.enabled())
+        holder = self._row(parent, "Starta med Windows")
+        ttk.Checkbutton(holder, variable=self._autostart).pack()
 
         self._adv: dict[str, tk.Variable] = {}
 
-        def adv_entry(label, key, value):
-            var = tk.StringVar(value="" if value is None else str(value))
-            holder = self._row(advanced, label)
+        def adv_entry(label, key, value, hint=None):
+            var = self._var(tk.StringVar, value="" if value is None else str(value))
+            holder = self._row(parent, label, hint=hint)
             ttk.Entry(holder, textvariable=var, width=_FIELD_W).pack()
             self._adv[key] = var
 
         def adv_combo(label, key, value, choices):
-            var = tk.StringVar(value="auto" if value is None else str(value))
-            holder = self._row(advanced, label)
+            var = self._var(
+                tk.StringVar, value="auto" if value is None else str(value)
+            )
+            holder = self._row(parent, label)
             ttk.Combobox(
                 holder, textvariable=var, values=choices, width=_FIELD_W - 2
             ).pack()
             self._adv[key] = var
 
+        ui.section(parent, "Tangenter")
+        adv_entry("Poleringstangent", "polish_hotkey", cfg["polish_hotkey"])
+        adv_entry(
+            "Tonvalsmenyns tangent", "polish_menu_hotkey", cfg["polish_menu_hotkey"],
+            hint="Tom = ingen menytangent",
+        )
+        self._double_tap = self._var(
+            tk.BooleanVar, value=bool(cfg["polish_double_tap"])
+        )
+        holder = self._row(
+            parent,
+            "Tonvalsmeny på dubbeltryck",
+            hint="Fördröjer varje polering ~0,4 s",
+        )
+        ttk.Checkbutton(holder, variable=self._double_tap).pack()
+        adv_entry("Hålltröskel (s)", "hold_threshold_s", cfg["hold_threshold_s"])
+
+        ui.section(parent, "Integritet och beteende")
+        self._restore = self._var(tk.BooleanVar, value=bool(cfg["restore_clipboard"]))
+        self._append = self._var(tk.BooleanVar, value=bool(cfg["append_space"]))
+        self._updates = self._var(tk.BooleanVar, value=bool(cfg["check_updates"]))
+        self._history_persist = self._var(
+            tk.BooleanVar, value=bool(cfg["history_persist"])
+        )
+        for text, var in (
+            ("Återställ klippbordet efter inklistring", self._restore),
+            ("Mellanslag efter varje diktering", self._append),
+            ("Sök efter uppdateringar vid start", self._updates),
+            ("Spara historik på disk (annars bara i minnet)", self._history_persist),
+        ):
+            ttk.Checkbutton(parent, text=text, variable=var).pack(anchor="w", pady=1)
+        holder = self._row(parent, "Inskrivning (standard)")
+        ttk.Combobox(
+            holder, textvariable=self._inject, values=list(_INJECT_CHOICES),
+            state="readonly", width=_FIELD_W - 2,
+        ).pack()
+        adv_entry(
+            "Stäng mikrofonen efter (s)", "mic_idle_close_s", cfg["mic_idle_close_s"]
+        )
+        adv_entry("Max inspelning (s)", "max_recording_s", cfg["max_recording_s"])
+
+        ui.section(parent, "Modeller")
         adv_entry("Modell svenska (HF-id)", "model", cfg["model"])
         adv_entry("Modell engelska", "model_en", cfg["model_en"])
         adv_combo("Beräkningsenhet", "device", cfg["device"], ["auto", "cuda", "cpu"])
@@ -478,92 +983,49 @@ class SettingsWindow:
             ["auto", "float16", "int8_float16", "int8"],
         )
         adv_entry("Beam size (tomt = auto)", "beam_size", cfg["beam_size"])
-        reverse_all_inject = {v: k for k, v in _INJECT_CHOICES.items()}
-        self._inject = tk.StringVar(
-            value=reverse_all_inject.get(cfg["inject_mode"], list(_INJECT_CHOICES)[0])
+
+        if gpu_panel is not None:
+            ui.section(parent, "GPU-stöd")
+            _ActionPanel(parent, self.win, gpu_panel)
+
+        ui.section(parent, "Uppdateringar")
+        self._github_token = self._var(
+            tk.StringVar, value=str(cfg.get("github_token", "") or "")
         )
-        holder = self._row(advanced, "Inskrivning (standard)")
-        ttk.Combobox(
-            holder, textvariable=self._inject, values=list(_INJECT_CHOICES),
-            state="readonly", width=_FIELD_W - 2,
-        ).pack()
-        adv_entry("Max inspelning (s)", "max_recording_s", cfg["max_recording_s"])
-        adv_entry("Hålltröskel (s)", "hold_threshold_s", cfg["hold_threshold_s"])
-        adv_entry("Poleringstangent", "polish_hotkey", cfg["polish_hotkey"])
-        adv_entry(
-            "Stäng mikrofonen efter (s)", "mic_idle_close_s", cfg["mic_idle_close_s"]
-        )
-        adv_entry("Tonvalsmenyns tangent", "polish_menu_hotkey", cfg["polish_menu_hotkey"])
-        self._double_tap = tk.BooleanVar(value=bool(cfg["polish_double_tap"]))
-        self._restore = tk.BooleanVar(value=bool(cfg["restore_clipboard"]))
-        self._append = tk.BooleanVar(value=bool(cfg["append_space"]))
-        self._updates = tk.BooleanVar(value=bool(cfg["check_updates"]))
-        self._history_persist = tk.BooleanVar(value=bool(cfg["history_persist"]))
-        ui.section(advanced, "Beteende")
-        for text, var in (
-            (
-                "Tonvalsmeny på dubbeltryck (fördröjer varje polering ~0,4 s)",
-                self._double_tap,
-            ),
-            ("Återställ klippbordet efter inklistring", self._restore),
-            ("Mellanslag efter varje diktering", self._append),
-            ("Sök efter uppdateringar vid start", self._updates),
-            ("Spara historik på disk (annars bara i minnet)", self._history_persist),
-        ):
-            ttk.Checkbutton(advanced, text=text, variable=var).pack(
-                anchor="w", pady=1
-            )
-        # GitHub-token för den inbyggda uppdateraren mot ett privat repo.
-        # Lösenordsmaskerad; tom som standard (anonymt, funkar för publika repon).
-        self._github_token = tk.StringVar(value=str(cfg.get("github_token", "") or ""))
         holder = self._row(
-            advanced,
-            "GitHub-token",
-            hint="Krävs för inbyggd uppdaterare mot privat repo",
+            parent, "GitHub-token", hint="Krävs för uppdaterare mot privat repo"
         )
         ttk.Entry(
             holder, textvariable=self._github_token, width=_FIELD_W, show="•"
         ).pack()
-        ui.section(advanced, "Prestanda")
+
+        ui.section(parent, "Felsökning")
         self._hint(
-            advanced,
+            parent,
             metrics.summary()
             or "Inga dikteringar mätta än – siffrorna dyker upp efter första.",
         )
-
-        files = tk.Frame(advanced, bg=pal["window"])
-        files.pack(anchor="w", pady=(10, 0))
+        files = tk.Frame(parent, bg=pal["window"])
+        files.pack(anchor="w", pady=(8, 0))
         ttk.Button(
-            files, text="Öppna config-filen",
-            command=lambda: os.startfile(CONFIG_PATH),
+            files, text="Öppna config-filen", command=lambda: os.startfile(CONFIG_PATH)
         ).pack(side="left")
         ttk.Button(
             files, text="Öppna loggen", command=lambda: os.startfile(LOG_PATH)
         ).pack(side="left", padx=(6, 0))
 
-        # ---- Fot ------------------------------------------------------------
-
-        footer = tk.Frame(self.win, bg=pal["window"])
-        footer.pack(fill="x", padx=12, pady=(6, 12))
-        self._error = tk.Label(
-            footer, text="", bg=pal["window"], fg="#e24b4a",
-            font=("Segoe UI", 8), anchor="w", justify="left",
-        )
-        self._error.pack(side="left")
-        ttk.Button(footer, text="Avbryt", command=self.win.destroy).pack(side="right")
-        ttk.Button(
-            footer, text="Spara", command=self._save, style="Accent.TButton"
-        ).pack(side="right", padx=(0, 6))
-        self._poll_remote()
-
     # -- Layouthjälpare ------------------------------------------------------------
 
-    def _tab(self, notebook: ttk.Notebook, title: str) -> tk.Frame:
-        # tk.Frame med ägd bakgrund — ttk.Frame kan tappa temat och falla
-        # tillbaka på klassiskt grått (det var Windows 2000-blandningen).
-        frame = tk.Frame(notebook, bg=ui.palette()["window"], padx=14, pady=10)
-        notebook.add(frame, text=title)
-        return frame
+    def _heading(self, parent, title: str, body: str) -> None:
+        pal = self._pal
+        tk.Label(
+            parent, text=title, bg=pal["window"], fg=pal["text"],
+            font=("Segoe UI", 15, "bold"), anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            parent, text=body, bg=pal["window"], fg=pal["muted"],
+            font=("Segoe UI", 9), anchor="w", justify="left", wraplength=560,
+        ).pack(fill="x", pady=(2, 10))
 
     def _row(self, parent, label: str, hint: str | None = None) -> tk.Frame:
         """Rad med etikett till vänster; returnerar hållaren till höger som
@@ -590,8 +1052,27 @@ class SettingsWindow:
         pal = ui.palette()
         tk.Label(
             parent, text=text, bg=pal["window"], fg=pal["muted"],
-            font=("Segoe UI", 8), anchor="w", justify="left",
+            font=("Segoe UI", 8), anchor="w", justify="left", wraplength=560,
         ).pack(fill="x")
+
+    def _text(self, parent, height: int, editable: bool = True) -> tk.Text:
+        """Textfält som fyller bredden — promptar behöver plats, och en
+        hårdkodad teckenbredd lämnade en tom remsa till höger."""
+        widget = ui.themed_text(parent, height=height, wrap="word")
+        widget.pack(fill="x", pady=(4, 2))
+        if editable:
+            self._texts.append(widget)
+        else:
+            widget.config(state="disabled")
+        return widget
+
+    def _set_text(self, widget: tk.Text, value: str) -> None:
+        state = str(widget.cget("state"))
+        widget.config(state="normal")
+        widget.delete("1.0", "end")
+        widget.insert("1.0", value)
+        widget.edit_modified(False)
+        widget.config(state=state)
 
     # -- Tangentfångst -----------------------------------------------------------
     # Bindningen sitter på KNAPPEN, inte fönstret: en fönsterbindning hade
@@ -616,9 +1097,7 @@ class SettingsWindow:
         self._cancel_capture()
         menu = tk.Menu(self.win, tearoff=0)
         for label, key in _MOUSE_BUTTONS.items():
-            menu.add_command(
-                label=label, command=lambda k=key: self._set_hotkey(k)
-            )
+            menu.add_command(label=label, command=lambda k=key: self._set_hotkey(k))
         try:
             menu.tk_popup(
                 self._hotkey_btn.winfo_rootx(),
@@ -630,33 +1109,6 @@ class SettingsWindow:
     def _set_hotkey(self, key: str) -> None:
         self._hotkey.set(key)
         self._hotkey_btn.config(text=key.upper())
-
-    # -- Ersättningsregler ---------------------------------------------------------
-
-    def _refresh_replacements(self) -> None:
-        self._repl_list.delete(0, "end")
-        self._repl_order = sorted(self._replacements, key=str.lower)
-        for heard in self._repl_order:
-            self._repl_list.insert("end", f"{heard}  →  {self._replacements[heard]}")
-
-    def _add_replacement(self) -> None:
-        heard = self._repl_heard.get().strip()
-        write = self._repl_write.get().strip()
-        if not heard or not write:
-            self._error.config(text="Fyll i både hörd fras och text att skriva.")
-            return
-        self._replacements[heard] = write
-        self._repl_heard.set("")
-        self._repl_write.set("")
-        self._error.config(text="")
-        self._refresh_replacements()
-
-    def _remove_replacement(self) -> None:
-        selection = self._repl_list.curselection()
-        if not selection or selection[0] >= len(self._repl_order):
-            return
-        self._replacements.pop(self._repl_order[selection[0]], None)
-        self._refresh_replacements()
 
     def _cancel_capture(self, _event=None) -> None:
         if not self._capturing:
@@ -693,383 +1145,11 @@ class SettingsWindow:
         self._hotkey_btn.config(text=hotkey.upper())
         return "break"
 
-    # -- Per-app-profiler ----------------------------------------------------------
-
-    def _refresh_profile_list(self) -> None:
-        focus.running_apps()  # värm namncachen så listan visar programnamn
-        self._app_list.delete(0, "end")
-        self._app_order = sorted(self._profiles)
-        for app in self._app_order:
-            self._app_list.insert("end", focus.display_name(app))
-        self._refresh_polish_overview()
-
-    def _on_profile_select(self, _event) -> None:
-        selection = self._app_list.curselection()
-        if not selection or selection[0] >= len(self._app_order):
-            return
-        app = self._app_order[selection[0]]
-        self._selected_app = app
-        profile = self._profiles[app]
-        self._profile_app.set(app)
-        self._profile_prompt.delete("1.0", "end")
-        self._profile_prompt.insert("1.0", profile.get("initial_prompt", ""))
-        self._profile_inject.set(
-            self._reverse_inject.get(
-                profile.get("inject_mode", "paste"), list(_INJECT_CHOICES)[0]
-            )
-        )
-        lang = profile.get("language")
-        self._profile_lang.set(
-            {None: "Samma som aktivt", "sv": "Svenska", "en": "Engelska"}.get(
-                lang, "Samma som aktivt"
-            )
-        )
-        # Poleringsval: mall (om den finns kvar), Egen text (fritext) eller
-        # Global standard (ärv). En pekare till en raderad mall visas som
-        # Global standard — samma effektiva beteende som upplösningen ger.
-        tmpl = (profile.get("polish_template") or "").strip()
-        self._profile_polish.delete("1.0", "end")
-        if tmpl and tmpl in self._template_names():
-            self._profile_polish_choice.set(tmpl)
-        elif profile.get("polish_prompt"):
-            self._profile_polish_choice.set(_OWN_TEXT)
-            self._profile_polish.insert("1.0", profile["polish_prompt"])
-        else:
-            self._profile_polish_choice.set(_GLOBAL_STANDARD)
-        self._toggle_profile_polish_text()
-        # Visa det effektiva läget: en profil utan eget flow-val ärver den
-        # globala standarden (samma väg som _on_start väljer). Då speglar
-        # kryssrutan vad som faktiskt händer, och att bocka bort den blir ett
-        # äkta "av"-override i stället för bara ett borttaget "på".
-        self._profile_flow.set(bool(profile.get("flow", self._flow.get())))
-
-    def _new_profile(self) -> None:
-        # Öppna väljaren för körande program (riktiga namn) + fritext. Avbryts
-        # den rörs editorn inte alls; annars fyller det valda processnamnet i
-        # en tom profileditor.
-        proc = self._choose_running_app()
-        if proc is None:
-            return
-        self._selected_app = None
-        self._app_list.selection_clear(0, "end")
-        self._profile_app.set(proc)
-        self._profile_prompt.delete("1.0", "end")
-        self._profile_polish.delete("1.0", "end")
-        self._profile_polish_choice.set(_GLOBAL_STANDARD)
-        self._toggle_profile_polish_text()
-        self._profile_inject.set(list(_INJECT_CHOICES)[0])
-        self._profile_lang.set(list(_PROFILE_LANG)[0])
-        # Ny profil ärver den globala standarden tills användaren avviker.
-        self._profile_flow.set(bool(self._flow.get()))
-        self._profile_app_box.config(values=focus.visible_apps())
-        self._profile_prompt.focus_set()
-
-    def _choose_running_app(self) -> str | None:
-        """Modal väljare för en ny app-profil: körande program med synliga
-        fönster (riktiga namn) plus ett fritextfält för manuellt processnamn.
-        Returnerar valt processnamn (gemener) eller None om väljaren avbröts.
-        Följer fönstermönstret här (ui.setup_window, temafärger) och körs i
-        huvudtråden — öppnas från Ny…-knappens command."""
-        pal = self._pal
-        apps = focus.running_apps()  # [(processnamn, visningsnamn)], värmer cachen
-        dlg = tk.Toplevel(self.win)
-        dlg.title("Välj app")
-        dlg.resizable(False, False)
-        dlg.attributes("-topmost", True)
-        ui.setup_window(dlg)
-        dlg.transient(self.win)
-        body = tk.Frame(dlg, bg=pal["window"], padx=14, pady=12)
-        body.pack(fill="both", expand=True)
-        self._hint(
-            body,
-            "Välj ett program som körs, eller skriv processnamnet själv "
-            "(t.ex. code.exe).",
-        )
-        listbox = ui.themed_listbox(body, height=8, exportselection=False)
-        listbox.pack(fill="both", expand=True, pady=(6, 6))
-        for _proc, display in apps:
-            listbox.insert("end", display)
-
-        manual = tk.StringVar()
-        holder = self._row(body, "Processnamn")
-        ttk.Entry(holder, textvariable=manual, width=_FIELD_W).pack()
-
-        result: dict[str, str | None] = {"proc": None}
-
-        def use(proc: str) -> None:
-            result["proc"] = proc
-            dlg.destroy()
-
-        def confirm() -> None:
-            # Fritextfältet vinner: det fylls med processnamnet vid markering
-            # men kan skrivas över för hand.
-            typed = manual.get().strip().lower()
-            if typed:
-                use(typed)
-                return
-            sel = listbox.curselection()
-            if sel and sel[0] < len(apps):
-                use(apps[sel[0]][0])
-
-        def on_select(_e) -> None:
-            sel = listbox.curselection()
-            if sel and sel[0] < len(apps):
-                manual.set(apps[sel[0]][0])
-
-        listbox.bind("<<ListboxSelect>>", on_select)
-        listbox.bind("<Double-Button-1>", lambda _e: confirm())
-
-        footer = tk.Frame(body, bg=pal["window"])
-        footer.pack(fill="x", pady=(10, 0))
-        ttk.Button(footer, text="Avbryt", command=dlg.destroy).pack(side="right")
-        ttk.Button(
-            footer, text="Välj", command=confirm, style="Accent.TButton"
-        ).pack(side="right", padx=(0, 6))
-        dlg.bind("<Escape>", lambda _e: dlg.destroy())
-        dlg.bind("<Return>", lambda _e: confirm())
-
-        dlg.update_idletasks()
-        w = dlg.winfo_reqwidth()
-        h = dlg.winfo_reqheight()
-        px, py = self.win.winfo_rootx(), self.win.winfo_rooty()
-        pw, ph = self.win.winfo_width(), self.win.winfo_height()
-        dlg.geometry(f"+{px + (pw - w) // 2}+{py + (ph - h) // 2}")
-        dlg.grab_set()
-        listbox.focus_set()
-        self.win.wait_window(dlg)
-        return result["proc"]
-
-    def _save_profile(self) -> None:
-        app = self._profile_app.get().strip().lower()
-        if not app:
-            self._error.config(text="Ange appens processnamn (t.ex. code.exe)")
-            return
-        profile = {}
-        prompt = self._profile_prompt.get("1.0", "end").strip()
-        if prompt:
-            profile["initial_prompt"] = prompt
-        # Poleringsval: skriv exakt en nyckel (eller ingen). Global standard =
-        # ingen nyckel (ärver global, bakåtkompatibelt). Egen text = fritext i
-        # polish_prompt. En mall = polish_template. Tom Egen text faller till
-        # Global standard.
-        choice = self._profile_polish_choice.get()
-        if choice == _OWN_TEXT:
-            polish = self._profile_polish.get("1.0", "end").strip()
-            if polish:
-                profile["polish_prompt"] = polish
-        elif choice != _GLOBAL_STANDARD:
-            profile["polish_template"] = choice
-        inject = _INJECT_CHOICES[self._profile_inject.get()]
-        if inject != "paste":
-            profile["inject_mode"] = inject
-        lang = _PROFILE_LANG[self._profile_lang.get()]
-        if lang:
-            profile["language"] = lang
-        # Flow: skriv ett explicit override bara när profilen avviker från den
-        # globala standarden – matchar den standarden utelämnas nyckeln så
-        # profilen fortsätter ärva den (åt båda hållen). Utan avvikelsetestet
-        # gick ett "av"-override inte att uttrycka: en avbockad ruta skrev
-        # ingenting och profilen ärvde ett globalt "på" ändå, och en handskriven
-        # flow: false föll tyst bort när profilen sparades om.
-        if self._profile_flow.get() != bool(self._flow.get()):
-            profile["flow"] = self._profile_flow.get()
-        if self._selected_app and self._selected_app != app:
-            self._profiles.pop(self._selected_app, None)
-        self._profiles[app] = profile
-        self._selected_app = app
-        self._error.config(text="")
-        self._refresh_profile_list()
-
-    def _remove_profile(self) -> None:
-        selection = self._app_list.curselection()
-        if selection and selection[0] < len(self._app_order):
-            self._profiles.pop(self._app_order[selection[0]], None)
-            self._refresh_profile_list()
-
-    # -- Polering-fliken -----------------------------------------------------------
-
-    def _template_names(self) -> list[str]:
-        return [t["namn"] for t in self._templates]
-
-    def _build_polishing_tab(self, parent, cfg, polish_panel, polish_ready) -> None:
-        """Samlar allt poleringsrelaterat: motorstatus/nedladdning, global
-        standard (mall/Egen text), globalt flow, mallbiblioteket och en
-        översikt över appar med egen polering."""
-        pal = self._pal
-
-        # -- Motor: var poleringen körs ----------------------------------------
-        ui.section(parent, "Poleringsmotor")
-        self._hint(
-            parent,
-            "Markera text var som helst och tryck poleringstangenten. Utan "
-            "GPU i datorn: välj \"Egen tjänst\" och peka den på en\n"
-            "poleringsserver — då körs omskrivningen där i stället.",
-        )
-        reverse_engine = {v: k for k, v in _ENGINE_CHOICES.items()}
-        self._engine = tk.StringVar(
-            value=reverse_engine.get(cfg["polish_backend"], list(_ENGINE_CHOICES)[0])
-        )
-        holder = self._row(parent, "Motor")
-        engine_combo = ttk.Combobox(
-            holder, textvariable=self._engine, values=list(_ENGINE_CHOICES),
-            state="readonly", width=_FIELD_W - 2,
-        )
-        engine_combo.pack()
-        engine_combo.bind("<<ComboboxSelected>>", lambda _e: self._show_engine_block())
-
-        self._engine_blocks: dict[str, tk.Frame] = {}
-
-        block = tk.Frame(parent, bg=pal["window"])
-        self._engine_blocks["builtin"] = block
-        if polish_panel is not None:
-            _ActionPanel(block, self.win, polish_panel)
-
-        block = tk.Frame(parent, bg=pal["window"])
-        self._engine_blocks["ollama"] = block
-        self._ollama_model = tk.StringVar(value=cfg["polish_ollama_model"])
-        holder = self._row(block, "Modell i Ollama")
-        ttk.Entry(holder, textvariable=self._ollama_model, width=_FIELD_W).pack()
-        self._ollama_url = tk.StringVar(value=cfg["polish_ollama_url"])
-        holder = self._row(block, "Ollamas adress")
-        ttk.Entry(holder, textvariable=self._ollama_url, width=_FIELD_W).pack()
-        self._build_remote_tools(block, "ollama")
-
-        block = tk.Frame(parent, bg=pal["window"])
-        self._engine_blocks["http"] = block
-        self._http_url = tk.StringVar(value=cfg["polish_http_url"])
-        holder = self._row(block, "Tjänstens adress")
-        ttk.Entry(holder, textvariable=self._http_url, width=_FIELD_W).pack()
-        self._http_model = tk.StringVar(value=cfg["polish_http_model"])
-        holder = self._row(block, "Modell i tjänsten")
-        ttk.Entry(holder, textvariable=self._http_model, width=_FIELD_W).pack()
-        self._http_token = tk.StringVar(value=str(cfg.get("polish_http_token") or ""))
-        holder = self._row(
-            block, "Nyckel", hint="Tom = ingen Authorization-header"
-        )
-        ttk.Entry(
-            holder, textvariable=self._http_token, width=_FIELD_W, show="•"
-        ).pack()
-        self._http_command = tk.StringVar(value=str(cfg.get("polish_http_command") or ""))
-        holder = self._row(
-            block,
-            "Startkommando",
-            hint="Lokal server som Viska får starta och stoppa",
-        )
-        ttk.Entry(holder, textvariable=self._http_command, width=_FIELD_W).pack()
-        self._build_service_row(block)
-        self._build_remote_tools(block, "http")
-        self._hint(
-            block,
-            "Med den här motorn lämnar den polerade texten datorn. Allt annat "
-            "i Viska stannar lokalt.",
-        )
-        self._show_engine_block()
-
-        # -- Global standard: mall eller Egen text -----------------------------
-        ui.section(parent, "Global standard")
-        self._hint(
-            parent,
-            "Poleringsuppgiften som gäller överallt utom där en app har en egen "
-            "(under Ordlista). Välj en mall ur biblioteket eller Egen text.",
-        )
-        names = self._template_names()
-        stored = (cfg.get("polish_template") or "").strip()
-        initial = stored if stored in names else _OWN_TEXT
-        self._global_polish_choice = tk.StringVar(value=initial)
-        gbox = tk.Frame(parent, bg=pal["window"])
-        gbox.pack(fill="x", pady=(2, 0))
-        self._global_polish_combo = ttk.Combobox(
-            gbox,
-            textvariable=self._global_polish_choice,
-            values=[_OWN_TEXT] + names,
-            state="readonly",
-            width=_FIELD_W - 2,
-        )
-        self._global_polish_combo.pack(anchor="w")
-        self._global_polish_combo.bind(
-            "<<ComboboxSelected>>", lambda _e: self._toggle_global_polish_text()
-        )
-        self._polish_prompt = ui.themed_text(gbox, width=54, height=2, wrap="word")
-        self._polish_prompt.insert("1.0", cfg["polish_prompt"])
-        self._toggle_global_polish_text()  # visar textfältet bara för Egen text
-
-        # -- Flow-läge (global) -----------------------------------------------
-        # Kryssrutan visas när poleringen är nedladdad ELLER när flaggan redan
-        # är på (så en kvarglömd flagga går att stänga av), annars en hjälptext.
-        ui.section(parent, "Flow-läge")
-        if polish_ready or bool(cfg["flow"]):
-            holder = self._row(
-                parent,
-                "Flow-läge (alla appar)",
-                hint="Polera dikteringen automatiskt innan den skrivs in",
-            )
-            ttk.Checkbutton(holder, variable=self._flow).pack()
-            if not polish_ready:
-                self._hint(
-                    parent,
-                    "Poleringen är inte nedladdad – flow-läget gör inget "
-                    "(dikteringen skrivs in som vanligt) tills du laddar ner "
-                    "den ovan.",
-                )
-        else:
-            self._hint(
-                parent,
-                "Flow-läge (automatisk polering av dikteringen) blir "
-                "tillgängligt när poleringen laddats ner ovan.",
-            )
-
-        # -- Mallbibliotek -----------------------------------------------------
-        ui.section(parent, "Mallbibliotek")
-        self._hint(
-            parent,
-            "Mallar som global standard och app-profiler pekar på. Ändras en "
-            "mall slår det igenom överallt där den används.",
-        )
-        picker = tk.Frame(parent, bg=pal["window"])
-        picker.pack(fill="x", pady=(4, 0))
-        self._template_list = ui.themed_listbox(
-            picker, height=5, exportselection=False
-        )
-        self._template_list.pack(side="left", fill="both", expand=True)
-        self._template_list.bind("<<ListboxSelect>>", self._on_template_select)
-        tbtns = tk.Frame(picker, bg=pal["window"])
-        tbtns.pack(side="left", fill="y", padx=(8, 0))
-        ttk.Button(tbtns, text="Ny…", width=12, command=self._new_template).pack(
-            pady=2
-        )
-        ttk.Button(
-            tbtns, text="Ta bort", width=12, command=self._remove_template
-        ).pack(pady=2)
-        self._template_name = tk.StringVar()
-        holder = self._row(parent, "Mallens namn")
-        self._template_name_entry = ttk.Entry(
-            holder, textvariable=self._template_name, width=_FIELD_W
-        )
-        self._template_name_entry.pack()
-        holder = self._row(parent, "Mallens prompt")
-        self._template_prompt = ui.themed_text(
-            holder, width=32, height=3, wrap="word"
-        )
-        self._template_prompt.pack()
-        ttk.Button(
-            parent, text="Spara mall", command=self._save_template
-        ).pack(anchor="e", pady=(6, 0))
-        self._refresh_template_list()
-
-        # -- Översikt: appar med egen polering/flow ----------------------------
-        ui.section(parent, "Appar med egen polering")
-        self._polish_overview = tk.Label(
-            parent, text="", bg=pal["window"], fg=pal["muted"],
-            font=("Segoe UI", 8), anchor="w", justify="left",
-        )
-        self._polish_overview.pack(fill="x")
-        self._refresh_polish_overview()
-
     # -- Poleringsmotorns block ----------------------------------------------------
 
     def _show_engine_block(self) -> None:
         """Visar bara den valda motorns inställningar. Blocken byggs en gång
-        och packas om — att bygga om fliken vid varje byte hade tappat allt
+        och packas om — att bygga om sidan vid varje byte hade tappat allt
         annat man hunnit skriva i den."""
         chosen = _ENGINE_CHOICES.get(self._engine.get(), "builtin")
         for name, block in self._engine_blocks.items():
@@ -1081,38 +1161,19 @@ class SettingsWindow:
             self._probe_remote(chosen)
 
     def _build_remote_tools(self, parent, backend: str) -> None:
-        """Anslutningsstatus + "Testa polering" med en redigerbar mening.
-
-        Allt arbete sker i en tråd och levereras via kön som _poll_remote
-        tömmer i huvudtråden — en tjänst som inte svarar får inte frysa
-        fönstret, vilket var precis vad den gamla synkrona kollen gjorde."""
+        """Anslutningsstatus som uppdateras utan att blockera GUI-tråden."""
         pal = self._pal
         status = tk.Label(
             parent, text="Kontrollerar anslutningen…", bg=pal["window"],
             fg=pal["muted"], font=("Segoe UI", 8), anchor="w", justify="left",
+            wraplength=520,
         )
         status.pack(fill="x", pady=(6, 0))
-        row = tk.Frame(parent, bg=pal["window"])
-        row.pack(fill="x", pady=(4, 0))
         ttk.Button(
-            row, text="Kontrollera igen",
+            parent, text="Kontrollera igen",
             command=lambda: self._probe_remote(backend),
-        ).pack(side="left")
-        ttk.Button(
-            row, text="Testa polering",
-            command=lambda: self._test_remote(backend),
-        ).pack(side="left", padx=(6, 0))
-        sample = ui.themed_text(parent, width=54, height=2, wrap="word")
-        sample.pack(fill="x", pady=(6, 2))
-        sample.insert("1.0", self._cfg.get("polish_test_text", ""))
-        result = tk.Label(
-            parent, text="", bg=pal["window"], fg=pal["muted"],
-            font=("Segoe UI", 8), anchor="w", justify="left", wraplength=460,
-        )
-        result.pack(fill="x")
-        self._remote_widgets[backend] = {
-            "status": status, "sample": sample, "result": result
-        }
+        ).pack(anchor="w", pady=(4, 0))
+        self._remote_widgets[backend] = {"status": status}
 
     def _build_service_row(self, parent) -> None:
         pal = self._pal
@@ -1195,43 +1256,288 @@ class SettingsWindow:
 
         threading.Thread(target=work, daemon=True, name="viska-probe").start()
 
-    def _test_remote(self, backend: str) -> None:
-        widgets = self._remote_widgets.get(backend)
-        if widgets is None:
-            return
-        text = widgets["sample"].get("1.0", "end").strip()
+    def _current_style(self) -> str:
+        """Poleringsuppgiften som testet ska använda: den som står i editorn
+        just nu, inte den som är sparad."""
+        self._commit_template()
+        cfg = {
+            **self._engine_cfg(),
+            "polish_templates": [dict(t) for t in self._templates],
+            "polish_template": (
+                self._global_polish_choice.get()
+                if self._global_polish_choice.get() in self._template_names()
+                else ""
+            ),
+            "polish_prompt": self._polish_prompt.get("1.0", "end").strip(),
+        }
+        return llm.resolve_polish_prompt(cfg)
+
+    def _run_test(self) -> None:
+        text = self._test_sample.get("1.0", "end").strip()
         if not text:
-            widgets["result"].config(text="Skriv en mening att testa med först.")
+            self._set_text(self._test_result, "Skriv en mening att testa med först.")
             return
-        widgets["result"].config(text="Polerar…")
+        backend = _ENGINE_CHOICES.get(self._engine.get(), "builtin")
         cfg = {**self._engine_cfg(), "polish_backend": backend}
-        style = llm.resolve_polish_prompt(cfg)
+        style = self._current_style()
+        self._test_token += 1
+        token = self._test_token
+        self._test_button.config(state="disabled")
+        self._test_cancel.config(state="normal")
+        self._test_time.config(text="")
+        self._set_text(self._test_result, "Polerar…")
 
         def work():
             t0 = time.perf_counter()
             try:
-                out = llm.polish_remote(cfg, text, style, "sv")
-                # Decimalkommat sätts på SIFFRAN. En replace på hela
-                # meddelandet träffade första punkten i den polerade texten.
+                if llm.is_remote(cfg):
+                    out = llm.polish_remote(cfg, text, style, "sv")
+                else:
+                    out = llm.Polisher(cfg).polish(text, style, "sv")
                 seconds = f"{time.perf_counter() - t0:.1f}".replace(".", ",")
-                msg = f"{out}\n\nSvarstid {seconds} s"
+                self._remote_queue.put(("test", "done", (token, out, seconds)))
             except Exception as e:  # noqa: BLE001
-                msg = f"Testet misslyckades: {e}"
-            self._remote_queue.put((backend, "result", msg))
+                self._remote_queue.put(("test", "error", (token, str(e), "")))
 
         threading.Thread(target=work, daemon=True, name="viska-polishtest").start()
+
+    def _cancel_test(self) -> None:
+        """Avbryter visningen, inte anropet: en förfrågan som redan är ute går
+        inte att ta tillbaka, men dess svar ska inte dyka upp i rutan efter
+        att man tryckt avbryt."""
+        self._test_token += 1
+        self._test_button.config(state="normal")
+        self._test_cancel.config(state="disabled")
+        self._set_text(self._test_result, "Testet avbrutet.")
+        self._test_time.config(text="")
+
+    def _finish_test(self, kind: str, payload) -> None:
+        token, text, seconds = payload
+        if token != self._test_token:
+            return  # avbrutet, eller ersatt av ett nyare test
+        self._test_button.config(state="normal")
+        self._test_cancel.config(state="disabled")
+        if kind == "error":
+            self._set_text(self._test_result, f"Testet misslyckades: {text}")
+            return
+        self._set_text(self._test_result, text)
+        self._test_time.config(text=f"Svarstid {seconds} s")
 
     def _poll_remote(self) -> None:
         try:
             while True:
-                backend, kind, text = self._remote_queue.get_nowait()
-                widgets = self._remote_widgets.get(backend)
-                if widgets is not None:
-                    widgets[kind].config(text=text)
+                key, kind, payload = self._remote_queue.get_nowait()
+                if key == "test":
+                    self._finish_test(kind, payload)
+                elif key == "mic":
+                    self._mic_info.config(text=payload)
+                else:
+                    widgets = self._remote_widgets.get(key)
+                    if widgets is not None and kind in widgets:
+                        widgets[kind].config(text=payload)
         except queue.Empty:
             pass
         if self.win.winfo_exists():
             self.win.after(150, self._poll_remote)
+
+    # -- App-profiler --------------------------------------------------------------
+
+    def _refresh_profile_list(self) -> None:
+        focus.running_apps()  # värm namncachen så listan visar programnamn
+        self._app_list.delete(0, "end")
+        self._app_order = sorted(self._profiles)
+        for app in self._app_order:
+            self._app_list.insert("end", focus.display_name(app))
+        self._refresh_polish_overview()
+
+    def _on_profile_select(self, _event) -> None:
+        selection = self._app_list.curselection()
+        if not selection or selection[0] >= len(self._app_order):
+            return
+        self._commit_profile()  # spara det man höll på med innan bytet
+        self._set_profile_editor(self._app_order[selection[0]])
+
+    def _set_profile_editor(self, app: str | None) -> None:
+        was_loading, self._loading = self._loading, True
+        try:
+            self._fill_profile_editor(app)
+        finally:
+            self._loading = was_loading
+
+    def _fill_profile_editor(self, app: str | None) -> None:
+        self._selected_app = app
+        profile = self._profiles.get(app or "", {})
+        self._profile_app.set(app or "")
+        self._set_text(self._profile_prompt, profile.get("initial_prompt", ""))
+        self._refresh_inherit_labels()
+        lang = profile.get("language")
+        self._profile_lang.set(
+            {"sv": "Svenska", "en": "Engelska"}.get(
+                lang, self._profile_lang_combo.cget("values")[0]
+            )
+        )
+        reverse_inject = {v: k for k, v in _INJECT_CHOICES.items()}
+        inject = profile.get("inject_mode")
+        self._profile_inject.set(
+            reverse_inject.get(inject, self._profile_inject_combo.cget("values")[0])
+        )
+        if profile.get("polish_template"):
+            self._profile_polish_choice.set(profile["polish_template"])
+        elif profile.get("polish_prompt"):
+            self._profile_polish_choice.set(_OWN_TEXT)
+        else:
+            self._profile_polish_choice.set(_GLOBAL_STANDARD)
+        self._set_text(self._profile_polish, profile.get("polish_prompt", ""))
+        self._toggle_profile_polish_text()
+        if "flow" in profile:
+            self._profile_flow.set("På" if profile["flow"] else "Av")
+        else:
+            self._profile_flow.set(self._profile_flow_combo.cget("values")[0])
+
+    def _commit_profile(self) -> None:
+        """Skriver redigeringsfältens innehåll till arbetskopian. Körs vid
+        listbyte, vid fokusskifte och innan Spara — det finns ingen egen
+        "spara profil"-knapp längre."""
+        app = self._profile_app.get().strip().lower()
+        if not app:
+            return
+        profile = {}
+        prompt = self._profile_prompt.get("1.0", "end").strip()
+        if prompt:
+            profile["initial_prompt"] = prompt
+        # Poleringsval: skriv exakt en nyckel (eller ingen). Ärv global =
+        # ingen nyckel (bakåtkompatibelt). Egen text = fritext i polish_prompt.
+        # En mall = polish_template.
+        choice = self._profile_polish_choice.get()
+        if choice == _OWN_TEXT:
+            polish = self._profile_polish.get("1.0", "end").strip()
+            if polish:
+                profile["polish_prompt"] = polish
+        elif choice != _GLOBAL_STANDARD and choice in self._template_names():
+            profile["polish_template"] = choice
+        if not self._inherit_value(self._profile_inject.get()):
+            profile["inject_mode"] = _INJECT_CHOICES[self._profile_inject.get()]
+        if not self._inherit_value(self._profile_lang.get()):
+            profile["language"] = (
+                "sv" if self._profile_lang.get() == "Svenska" else "en"
+            )
+        # Flow: bara ett uttryckligt val skrivs. "Ärv global" utelämnar
+        # nyckeln, vilket är exakt vad arv betyder i configen — och gör att
+        # ett "av" går att uttrycka även när det globala står på.
+        if not self._inherit_value(self._profile_flow.get()):
+            profile["flow"] = self._profile_flow.get() == "På"
+        if self._selected_app and self._selected_app != app:
+            self._profiles.pop(self._selected_app, None)
+        self._profiles[app] = profile
+        self._selected_app = app
+        self._refresh_profile_list()
+
+    def _new_profile(self) -> None:
+        self._commit_profile()
+        proc = self._choose_running_app()
+        if not proc:
+            return
+        self._profiles.setdefault(proc.lower(), {})
+        self._refresh_profile_list()
+        self._set_profile_editor(proc.lower())
+        self._mark_dirty()
+
+    def _choose_running_app(self) -> str | None:
+        """Liten väljare med körande program. Returnerar processnamnet."""
+        pal = self._pal
+        picker = tk.Toplevel(self.win)
+        picker.title("Välj program")
+        picker.transient(self.win)
+        picker.grab_set()
+        ui.setup_window(picker)
+        frame = tk.Frame(picker, bg=pal["window"], padx=14, pady=12)
+        frame.pack(fill="both", expand=True)
+        tk.Label(
+            frame, text="Program som körs nu", bg=pal["window"], fg=pal["text"],
+            font=("Segoe UI", 9), anchor="w",
+        ).pack(fill="x")
+        listbox = ui.themed_listbox(frame, height=12, exportselection=False)
+        listbox.pack(fill="both", expand=True, pady=(6, 6))
+        apps = focus.running_apps()
+        for proc, name in apps:
+            listbox.insert("end", f"{name}  ({proc})")
+        manual = tk.StringVar()
+        entry_row = tk.Frame(frame, bg=pal["window"])
+        entry_row.pack(fill="x")
+        tk.Label(
+            entry_row, text="eller skriv processnamn:", bg=pal["window"],
+            fg=pal["muted"], font=("Segoe UI", 8),
+        ).pack(side="left")
+        ttk.Entry(entry_row, textvariable=manual, width=22).pack(
+            side="left", padx=(6, 0)
+        )
+        chosen: dict[str, str] = {}
+
+        def use(proc: str) -> None:
+            chosen["proc"] = proc
+            picker.destroy()
+
+        def confirm() -> None:
+            selection = listbox.curselection()
+            if selection:
+                use(apps[selection[0]][0])
+            elif manual.get().strip():
+                use(manual.get().strip())
+
+        listbox.bind("<Double-Button-1>", lambda _e: confirm())
+        buttons = tk.Frame(frame, bg=pal["window"])
+        buttons.pack(fill="x", pady=(10, 0))
+        ttk.Button(buttons, text="Avbryt", command=picker.destroy).pack(side="right")
+        ttk.Button(
+            buttons, text="Välj", command=confirm, style="Accent.TButton"
+        ).pack(side="right", padx=(0, 6))
+        picker.wait_window()
+        return chosen.get("proc")
+
+    def _remove_profile(self) -> None:
+        if self._selected_app:
+            self._profiles.pop(self._selected_app, None)
+        self._selected_app = None
+        self._refresh_profile_list()
+        self._set_profile_editor(None)
+        self._mark_dirty()
+
+    def _toggle_profile_polish_text(self) -> None:
+        if self._profile_polish_choice.get() == _OWN_TEXT:
+            self._profile_polish.pack(fill="x", pady=(4, 2))
+        else:
+            self._profile_polish.pack_forget()
+
+    def _refresh_polish_overview(self) -> None:
+        rows = []
+        for app in sorted(self._profiles):
+            profile = self._profiles[app]
+            bits = []
+            if profile.get("polish_template"):
+                bits.append(f"stil: {profile['polish_template']}")
+            elif profile.get("polish_prompt"):
+                bits.append("stil: egen text")
+            if "flow" in profile:
+                bits.append(
+                    "polera automatiskt: " + ("på" if profile["flow"] else "av")
+                )
+            if profile.get("language"):
+                bits.append(f"språk: {profile['language']}")
+            if profile.get("inject_mode"):
+                bits.append(f"inskrivning: {profile['inject_mode']}")
+            if profile.get("initial_prompt"):
+                bits.append("egen ordlista")
+            rows.append(
+                f"{focus.display_name(app)}: " + (", ".join(bits) or "ärver allt")
+            )
+        self._polish_overview.config(
+            text="\n".join(rows) or "Inga profiler ännu – lägg till en ovan."
+        )
+
+    # -- Mallbiblioteket -----------------------------------------------------------
+
+    def _template_names(self) -> list[str]:
+        return [t["namn"] for t in self._templates]
 
     def _toggle_global_polish_text(self) -> None:
         if self._global_polish_choice.get() == _OWN_TEXT:
@@ -1239,134 +1545,134 @@ class SettingsWindow:
         else:
             self._polish_prompt.pack_forget()
 
-    def _toggle_profile_polish_text(self) -> None:
-        if self._profile_polish_choice.get() == _OWN_TEXT:
-            self._profile_polish.pack(fill="x", pady=(2, 0))
-        else:
-            self._profile_polish.pack_forget()
-
     def _refresh_polish_choices(self) -> None:
-        """Uppdaterar båda poleringsväljarnas mallnamn efter en biblioteks-
-        ändring och lagar val som pekar på en mall som just försvann."""
         names = self._template_names()
+        current = self._global_polish_choice.get()
         self._global_polish_combo.config(values=[_OWN_TEXT] + names)
-        if self._global_polish_choice.get() not in ([_OWN_TEXT] + names):
+        if current not in names and current != _OWN_TEXT:
             self._global_polish_choice.set(_OWN_TEXT)
-        self._toggle_global_polish_text()
-        self._profile_polish_combo.config(
-            values=[_GLOBAL_STANDARD] + names + [_OWN_TEXT]
-        )
-        if self._profile_polish_choice.get() not in (
-            [_GLOBAL_STANDARD, _OWN_TEXT] + names
-        ):
-            self._profile_polish_choice.set(_GLOBAL_STANDARD)
-        self._toggle_profile_polish_text()
+            self._toggle_global_polish_text()
+        if hasattr(self, "_profile_polish_combo"):
+            self._refresh_inherit_labels()
 
     def _refresh_template_list(self) -> None:
         self._template_list.delete(0, "end")
-        for name in self._template_names():
-            self._template_list.insert("end", name)
+        for template in self._templates:
+            self._template_list.insert("end", template["namn"])
+        self._refresh_polish_choices()
 
     def _on_template_select(self, _event) -> None:
         selection = self._template_list.curselection()
-        if not selection:
+        if not selection or selection[0] >= len(self._templates):
             return
-        name = self._template_list.get(selection[0])
-        tmpl = next((t for t in self._templates if t["namn"] == name), None)
-        if tmpl is None:
+        index = selection[0]
+        self._commit_template()  # spara det man höll på med innan bytet
+        if index >= len(self._templates):
             return
-        self._selected_template = name
-        self._template_name.set(tmpl["namn"])
-        self._template_prompt.delete("1.0", "end")
-        self._template_prompt.insert("1.0", tmpl.get("prompt", ""))
+        template = self._templates[index]
+        was_loading, self._loading = self._loading, True
+        try:
+            self._selected_template = template["namn"]
+            self._template_name.set(template["namn"])
+            self._set_text(self._template_prompt, template["prompt"])
+        finally:
+            self._loading = was_loading
 
     def _new_template(self) -> None:
+        self._commit_template()
         self._selected_template = None
-        self._template_name.set("")
-        self._template_prompt.delete("1.0", "end")
+        self._template_name.set("Ny stil")
+        self._set_text(self._template_prompt, "")
         self._template_name_entry.focus_set()
 
-    def _save_template(self) -> None:
+    def _commit_template(self) -> None:
+        """Skriver editorn till arbetskopian. Ett namnbyte följer med till
+        alla som pekar på mallen — annars hade en omdöpt stil tyst blivit
+        "Egen text" för varje profil som använde den."""
         name = self._template_name.get().strip()
         if not name:
-            self._error.config(text="Ge mallen ett namn.")
-            return
-        if name in (_GLOBAL_STANDARD, _OWN_TEXT):
-            self._error.config(
-                text=f"\"{name}\" är reserverat – välj ett annat namn."
-            )
-            return
-        if name in self._template_names() and name != self._selected_template:
-            self._error.config(text=f"En mall med namnet \"{name}\" finns redan.")
             return
         prompt = self._template_prompt.get("1.0", "end").strip()
         old = self._selected_template
-        if old is not None:
-            for t in self._templates:
-                if t["namn"] == old:
-                    t["namn"] = name
-                    t["prompt"] = prompt
-                    break
-            if old != name:
-                self._rename_template_refs(old, name)
+        if old is not None and old != name:
+            if any(t["namn"] == name for t in self._templates if t["namn"] != old):
+                self._error.config(text=f"Det finns redan en stil som heter {name}.")
+                return
+            for template in self._templates:
+                if template["namn"] == old:
+                    template["namn"] = name
+                    template["prompt"] = prompt
+            self._rename_template_refs(old, name)
+        elif any(t["namn"] == name for t in self._templates):
+            for template in self._templates:
+                if template["namn"] == name:
+                    template["prompt"] = prompt
         else:
             self._templates.append({"namn": name, "prompt": prompt})
         self._selected_template = name
         self._error.config(text="")
         self._refresh_template_list()
-        self._refresh_polish_choices()
-        self._refresh_polish_overview()
 
     def _remove_template(self) -> None:
         selection = self._template_list.curselection()
-        if not selection:
+        if not selection or selection[0] >= len(self._templates):
             return
-        name = self._template_list.get(selection[0])
-        self._templates = [t for t in self._templates if t["namn"] != name]
-        if self._selected_template == name:
+        removed = self._templates.pop(selection[0])["namn"]
+        if self._selected_template == removed:
             self._selected_template = None
             self._template_name.set("")
-            self._template_prompt.delete("1.0", "end")
+            self._set_text(self._template_prompt, "")
         self._refresh_template_list()
-        self._refresh_polish_choices()
-        self._refresh_polish_overview()
+        self._mark_dirty()
 
     def _rename_template_refs(self, old: str, new: str) -> None:
-        """Följ med pekare vid namnbyte så de inte tyst faller tillbaka på
-        global standard: den globala väljaren, öppen profil och alla sparade
-        profiler som pekade på den gamla mallen."""
         if self._global_polish_choice.get() == old:
             self._global_polish_choice.set(new)
+        for profile in self._profiles.values():
+            if profile.get("polish_template") == old:
+                profile["polish_template"] = new
         if self._profile_polish_choice.get() == old:
             self._profile_polish_choice.set(new)
-        for prof in self._profiles.values():
-            if prof.get("polish_template") == old:
-                prof["polish_template"] = new
 
-    def _refresh_polish_overview(self) -> None:
-        if not hasattr(self, "_polish_overview"):
+    # -- Ersättningsregler ---------------------------------------------------------
+
+    def _refresh_replacements(self) -> None:
+        self._repl_list.delete(0, "end")
+        self._repl_order = sorted(self._replacements, key=str.lower)
+        for heard in self._repl_order:
+            self._repl_list.insert("end", f"{heard}  →  {self._replacements[heard]}")
+
+    def _add_replacement(self) -> None:
+        heard = self._repl_heard.get().strip()
+        write = self._repl_write.get().strip()
+        if not heard or not write:
+            self._error.config(text="Fyll i både hörd fras och text att skriva.")
             return
-        names = self._template_names()
-        lines = []
-        for app in sorted(self._profiles):
-            prof = self._profiles[app]
-            parts = []
-            tmpl = (prof.get("polish_template") or "").strip()
-            if tmpl:
-                parts.append(
-                    f"mall: {tmpl}" if tmpl in names else "mall saknas → global"
-                )
-            elif prof.get("polish_prompt"):
-                parts.append("egen text")
-            if "flow" in prof:
-                parts.append("flow på" if prof.get("flow") else "flow av")
-            if parts:
-                lines.append(f"{focus.display_name(app)} – {' · '.join(parts)}")
-        self._polish_overview.config(
-            text="\n".join(lines) if lines else "Inga appar har egen polering ännu."
-        )
+        self._replacements[heard] = write
+        self._repl_heard.set("")
+        self._repl_write.set("")
+        self._error.config(text="")
+        self._refresh_replacements()
+        self._mark_dirty()
 
-    # -- Spara --------------------------------------------------------------------
+    def _remove_replacement(self) -> None:
+        selection = self._repl_list.curselection()
+        if not selection or selection[0] >= len(self._repl_order):
+            return
+        self._replacements.pop(self._repl_order[selection[0]], None)
+        self._refresh_replacements()
+        self._mark_dirty()
+
+    # -- Spara ---------------------------------------------------------------------
+
+    def _commit_editors(self) -> None:
+        """Allt som står i en redigerare räknas som gjort. Det var den gamla
+        oklarheten: en ifylld mall eller profil kastades om man inte råkade
+        trycka på rätt av två sparaknappar."""
+        self._commit_template()
+        self._commit_profile()
+        if self._repl_heard.get().strip() and self._repl_write.get().strip():
+            self._add_replacement()
 
     def values(self) -> dict:
         lang_reverse = {v: k for k, v in self._language_names.items()}
@@ -1382,7 +1688,7 @@ class SettingsWindow:
             # tillbaka. Upplösningen använder den bara när polish_template är tom.
             "polish_prompt": self._polish_prompt.get("1.0", "end").strip(),
             "polish_templates": [dict(t) for t in self._templates],
-            # Global standard pekar på en mall, eller "" = Egen text.
+            # Standardstilen pekar på en mall, eller "" = Egen text.
             "polish_template": (
                 self._global_polish_choice.get()
                 if self._global_polish_choice.get() in self._template_names()
@@ -1407,6 +1713,7 @@ class SettingsWindow:
             "polish_http_token": self._http_token.get().strip(),
             "polish_http_command": self._http_command.get().strip(),
             "polish_double_tap": self._double_tap.get(),
+            "polish_test_text": self._test_sample.get("1.0", "end").strip(),
             "replacements": dict(self._replacements),
             "check_updates": self._updates.get(),
             "history_persist": self._history_persist.get(),
@@ -1416,8 +1723,9 @@ class SettingsWindow:
             interval, silence = FEELS[self._feel.get()]
             changes["live_interval_s"] = interval
             changes["live_commit_silence_s"] = silence
-        # Avancerat vinner bara om fältet uttryckligen ÄNDRATS — annars
-        # gäller kvalitetsvalet i Allmänt (en förenkling av samma sak).
+        # Modellfältet under Inställningar vinner bara om det uttryckligen
+        # ÄNDRATS — annars gäller kvalitetsvalet på Diktering-sidan (en
+        # förenkling av samma sak).
         adv_model = self._adv["model"].get().strip()
         if adv_model and adv_model != self._orig_model:
             changes["model"] = adv_model
@@ -1442,22 +1750,10 @@ class SettingsWindow:
         )
         changes["polish_hotkey"] = self._adv["polish_hotkey"].get().strip() or "f8"
         changes["polish_menu_hotkey"] = self._adv["polish_menu_hotkey"].get().strip()
-        for backend, widgets in self._remote_widgets.items():
-            if backend == changes["polish_backend"]:
-                changes["polish_test_text"] = widgets["sample"].get(
-                    "1.0", "end"
-                ).strip()
         return changes
 
     def _save(self) -> None:
-        # Har användaren fyllt i profil- eller mallredigeraren utan att klicka
-        # "Spara" i respektive ruta ska det inte tyst kastas bort.
-        if self._profile_app.get().strip():
-            self._save_profile()
-        if self._template_name.get().strip():
-            self._save_template()
-        if self._repl_heard.get().strip() and self._repl_write.get().strip():
-            self._add_replacement()
+        self._commit_editors()
         try:
             changes = self.values()
         except ValueError as e:
@@ -1470,9 +1766,7 @@ class SettingsWindow:
             self._error.config(text=str(e))
             return
         if is_mouse(changes["polish_hotkey"]):
-            self._error.config(
-                text="Poleringstangenten kan inte vara en musknapp."
-            )
+            self._error.config(text="Poleringstangenten kan inte vara en musknapp.")
             return
         menu_key = changes["polish_menu_hotkey"]
         if menu_key:
@@ -1482,9 +1776,7 @@ class SettingsWindow:
                 self._error.config(text=str(e))
                 return
             if is_mouse(menu_key):
-                self._error.config(
-                    text="Tonvalsmenyn kan inte ligga på en musknapp."
-                )
+                self._error.config(text="Tonvalsmenyn kan inte ligga på en musknapp.")
                 return
         bindings = [changes["hotkey"], changes["polish_hotkey"]] + (
             [menu_key] if menu_key else []
@@ -1498,4 +1790,5 @@ class SettingsWindow:
         if error:
             self._error.config(text=error)
             return
+        self._closing = True
         self.win.destroy()
