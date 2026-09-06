@@ -6,6 +6,7 @@ import os
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 import urllib.error
 from collections import deque
@@ -13,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from viska import __version__, autostart, commands, gpu, llm, update
+from viska import __version__, autostart, commands, gpu, llm, metrics, update
 from viska.audio import SAMPLE_RATE, Recorder
 from viska.config import (
     CONFIG_DIR,
@@ -31,7 +32,8 @@ from viska.focus import (
     foreground_is_terminal,
     foreground_window,
 )
-from viska.hotkey import ActionKey, HotkeyError, PushToTalk
+from viska.correct import CorrectionWindow
+from viska.hotkey import ActionKey, HotkeyError, create_push_to_talk
 from viska.inject import (
     copy_to_clipboard,
     grab_selection,
@@ -64,7 +66,10 @@ class App:
         self.root = root
         self.sounds = Sounds(cfg["sounds"])
         self.recorder = Recorder(
-            cfg["input_device"], cfg["keep_mic_open"], cfg["preroll_s"]
+            cfg["input_device"],
+            cfg["mic_mode"],
+            cfg["preroll_s"],
+            cfg["mic_idle_close_s"],
         )
         self.overlay = Overlay(root, level_source=lambda: self.recorder.level)
         self.tone_menu = ToneMenu(root)
@@ -105,6 +110,9 @@ class App:
         # tillbaka den polerade texten hit så resultatet hamnar rätt även om
         # fokus hunnit flytta under poleringen.
         self._session_target_hwnd: int | None = None
+        # Tidpunkten dikteringen stoppades — nollpunkten för väntan som
+        # användaren faktiskt upplever (stopp → text på skärmen).
+        self._session_stopped_at = 0.0
         # En modelladdning per språk i taget — utan spärren skulle varje
         # tangenttryck i en profilerad app starta ännu en 3 GB-laddning.
         self._loading_langs: set[str] = set()
@@ -123,9 +131,11 @@ class App:
         # appen från att starta — men trayikonen finns inte förrän main()
         # kört klart make_tray(), så notiserna köas här och flushas därifrån.
         self._startup_notices: list[str] = []
-        self.hotkey: PushToTalk | None = None
+        # PushToTalk eller MouseTrigger beroende på bindningen (se
+        # create_push_to_talk); båda har samma håll/växla-kontrakt.
+        self.hotkey = None
         try:
-            self.hotkey = PushToTalk(
+            self.hotkey = create_push_to_talk(
                 cfg["hotkey"], cfg["hold_threshold_s"], self._on_start, self._on_stop
             )
         except HotkeyError as e:
@@ -137,14 +147,15 @@ class App:
         # instansiera Polisher samtidigt.
         self._polisher_lock = threading.Lock()
         self._polishing = threading.Event()
-        # Ollama-nåbarhet cachas: flow-beslutet vid start (live eller inte)
-        # behöver veta om poleringen är tillgänglig, men ett synkront HTTP-
-        # anrop på hotkey-tråden skulle fördröja "Spelar in" upp till 2 s när
-        # Ollama är nere. Cachen läses där och uppdateras i bakgrunden.
-        self._ollama_reachable = False
-        if cfg["polish_backend"] == "ollama":
+        # Fjärrbackendens nåbarhet cachas: flow-beslutet vid start (live
+        # eller inte) behöver veta om poleringen är tillgänglig, men ett
+        # synkront HTTP-anrop på hotkey-tråden skulle fördröja "Spelar in"
+        # upp till 2 s när tjänsten är nere. Cachen läses där och uppdateras
+        # i bakgrunden.
+        self._remote_reachable = False
+        if llm.is_remote(cfg):
             threading.Thread(
-                target=self._refresh_ollama_reachable, daemon=True
+                target=self._refresh_remote_reachable, daemon=True
             ).start()
         self.polish_key: ActionKey | None = None
         try:
@@ -482,14 +493,14 @@ class App:
             # med liveinskrivning i stället — annars skulle en kvarglömd flow-
             # flagga (t.ex. efter "Ta bort poleringen") tyst stänga av live och
             # falla tillbaka på råtext varje gång. Tillgänglighetskollen är
-            # icke-blockerande (Ollama läses ur cachen) så hotkey-tråden aldrig
+            # icke-blockerande (cachen läses) så hotkey-tråden aldrig
             # hänger på nätverket; vanlig diktering utan flow kortsluter och
             # betalar inget.
             flow_flag = bool(profile.get("flow", self.cfg["flow"]))
-            if flow_flag and self.cfg["polish_backend"] == "ollama":
+            if flow_flag and llm.is_remote(self.cfg):
                 # Håll cachen färsk till nästa diktering utan att blockera nu.
                 threading.Thread(
-                    target=self._refresh_ollama_reachable, daemon=True
+                    target=self._refresh_remote_reachable, daemon=True
                 ).start()
             self._session_flow = flow_flag and self._flow_polish_available()
             # Poleringsuppgift via den gemensamma upplösningen (mall/fritext →
@@ -545,7 +556,7 @@ class App:
         return bool(live)
 
     def _on_live_commit(self, text: str) -> None:
-        text = commands.apply(text, self.cfg["voice_commands"])
+        text = self._post_process(text)
         self._live_texts.append(text)
         try:
             # Mellanslag mellan fraser oavsett append_space — annars klistras
@@ -578,6 +589,7 @@ class App:
                 watchdog.cancel()
             self.sounds.stop()
             self._set_tray_recording(False)
+            self._session_stopped_at = time.perf_counter()
             live, self._live = self._live, None
             committed = live.stop() if live is not None else 0
             audio = self.recorder.stop()
@@ -624,11 +636,14 @@ class App:
                 # senaste diktering".
                 self.last_text = " ".join(live_texts).strip()
             text = ""
+            transcribe_ms = 0.0
             too_short = len(audio) < 0.3 * SAMPLE_RATE
             silent = audio.size == 0 or float(np.abs(audio).max()) < 0.003
             if not (too_short or silent) and transcriber is not None:
-                text = transcriber.transcribe(audio, lang, initial_prompt=prompt)
-                text = commands.apply(text, self.cfg["voice_commands"])
+                with metrics.Timer() as t:
+                    text = transcriber.transcribe(audio, lang, initial_prompt=prompt)
+                transcribe_ms = t.ms
+                text = self._post_process(text)
             if flow and text:
                 # Flow-läge: polera hela transkriptet innan inskrivning.
                 # live_texts är alltid tomt här (preview_only committar aldrig).
@@ -637,7 +652,10 @@ class App:
                 # skriva in före den polerade texten, och fönstret dikteringen
                 # gällde behåller fokus. Poleringen har en hård tidsgräns
                 # (FLOW_POLISH_TIMEOUT_S) så väntan aldrig blir oändlig.
-                self._finish_flow(text, inject_mode, polish_prompt, target_hwnd, lang)
+                self._finish_flow(
+                    text, inject_mode, polish_prompt, target_hwnd, lang,
+                    audio_s=len(audio) / SAMPLE_RATE, transcribe_ms=transcribe_ms,
+                )
                 return
             if live_texts or text:
                 self.last_text = " ".join([*live_texts, text]).strip()
@@ -653,7 +671,11 @@ class App:
                 return
             if self.cfg["append_space"] and not text.endswith("\n"):
                 text += " "
-            inject(text, inject_mode, self.cfg["restore_clipboard"])
+            with metrics.Timer() as t:
+                inject(text, inject_mode, self.cfg["restore_clipboard"])
+            self._record_metrics(
+                audio, transcribe_ms, t.ms, len(text), live=bool(live_texts)
+            )
             self.overlay.hide()
         except Exception:
             log.exception("Transkriberingen misslyckades")
@@ -664,6 +686,51 @@ class App:
         finally:
             self._transcribing.clear()
 
+    def _post_process(self, text: str) -> str:
+        """Ersättningsregler före röstkommandon: en regel ska aldrig kunna
+        råka bygga ihop frasen som blir en radbrytning."""
+        text = commands.apply_replacements(text, self.cfg["replacements"])
+        return commands.apply(text, self.cfg["voice_commands"])
+
+    def _elapsed_since_stop(self) -> float:
+        """Millisekunder sedan dikteringen stoppades (0 om okänt)."""
+        t0 = self._session_stopped_at
+        return (time.perf_counter() - t0) * 1000 if t0 else 0.0
+
+    def _record_metrics(
+        self, audio, transcribe_ms: float, inject_ms: float, chars: int, live: bool
+    ) -> None:
+        metrics.record(
+            audio_s=len(audio) / SAMPLE_RATE,
+            transcribe_ms=transcribe_ms,
+            inject_ms=inject_ms,
+            total_ms=self._elapsed_since_stop(),
+            chars=chars,
+            live=live,
+        )
+
+    # -- Rätta senaste dikteringen (bygger ersättningsregler) -----------------------
+
+    def request_correction(self) -> None:
+        """Trayn kör i egen tråd; Tk måste öppnas från huvudtråden."""
+        self._ui_queue.put(self._open_correction)
+
+    def _open_correction(self) -> None:
+        if not self.last_text:
+            self.overlay.show(
+                "Viska: ingen diktering att rätta än", GRAY, auto_hide_ms=2000
+            )
+            return
+        CorrectionWindow(
+            self.root, self.last_text, dict(self.cfg["replacements"]),
+            on_save=self._save_replacements,
+        )
+
+    def _save_replacements(self, replacements: dict) -> None:
+        self.cfg["replacements"] = replacements
+        save(self.cfg)
+        log.info("Ersättningsregler sparade (%d st)", len(replacements))
+
     # -- Flow-läge (automatisk polering före inskrivning) ---------------------------
 
     def _finish_flow(
@@ -673,6 +740,8 @@ class App:
         polish_prompt: str,
         target_hwnd: int | None,
         lang: str = "sv",
+        audio_s: float = 0.0,
+        transcribe_ms: float = 0.0,
     ) -> None:
         """Polerar hela dikteringen och skriver in resultatet på en gång.
         Körs synkront på transkriberingstråden med _transcribing kvar satt:
@@ -689,7 +758,9 @@ class App:
         self.last_text = raw
         self._remember(raw)
         self._refresh_tray_menu()
-        polished = self._polish_for_flow(raw, polish_prompt, lang)
+        with metrics.Timer() as t:
+            polished = self._polish_for_flow(raw, polish_prompt, lang)
+        polish_ms = t.ms
         if polished and polished.strip() and polished.strip() != raw.strip():
             self.last_text = polished
             self._remember(polished)  # polerad överst
@@ -704,7 +775,17 @@ class App:
         # (fokus kvar) är det en no-op och ingen fokusstöld sker.
         if target_hwnd:
             focus_window(target_hwnd)
-        inject(out, inject_mode, self.cfg["restore_clipboard"])
+        with metrics.Timer() as t:
+            inject(out, inject_mode, self.cfg["restore_clipboard"])
+        metrics.record(
+            audio_s=audio_s,
+            transcribe_ms=transcribe_ms,
+            inject_ms=t.ms,
+            total_ms=self._elapsed_since_stop(),
+            chars=len(out),
+            polish_ms=polish_ms,
+            flow=True,
+        )
         self.overlay.hide()
 
     def _polish_for_flow(self, text: str, style: str, lang: str = "sv") -> str | None:
@@ -718,8 +799,8 @@ class App:
 
         def work():
             try:
-                if self.cfg["polish_backend"] == "ollama":
-                    result["text"] = llm.polish_ollama(self.cfg, text, style, lang)
+                if llm.is_remote(self.cfg):
+                    result["text"] = llm.polish_remote(self.cfg, text, style, lang)
                 else:
                     polisher = self._get_polisher()
                     polisher.ensure_loaded()
@@ -749,7 +830,7 @@ class App:
         """Börjar ladda in poleringsmodellen i bakgrunden när en flow-session
         startar, så att den är varm när dikteringen stoppas. Idempotent –
         ensure_loaded returnerar direkt om modellen redan är laddad."""
-        if self.cfg["polish_backend"] == "ollama" or not llm.installed(self.cfg):
+        if llm.is_remote(self.cfg) or not llm.installed(self.cfg):
             return
 
         def work():
@@ -765,18 +846,18 @@ class App:
     def _flow_polish_available(self) -> bool:
         """Icke-blockerande koll vid start om poleringen kan användas för flow
         (annars körs sessionen som vanlig diktering med liveinskrivning). För
-        Ollama läses den bakgrundsuppdaterade cachen — ett synkront HTTP-anrop
-        på hotkey-tråden skulle fördröja "Spelar in". builtin är en billig
-        filkoll."""
-        if self.cfg["polish_backend"] == "ollama":
-            return self._ollama_reachable
+        fjärrbackender läses den bakgrundsuppdaterade cachen — ett synkront
+        HTTP-anrop på hotkey-tråden skulle fördröja "Spelar in". builtin är en
+        billig filkoll."""
+        if llm.is_remote(self.cfg):
+            return self._remote_reachable
         return llm.installed(self.cfg)
 
-    def _refresh_ollama_reachable(self) -> None:
+    def _refresh_remote_reachable(self) -> None:
         try:
-            self._ollama_reachable = llm.ollama_reachable(self.cfg)
+            self._remote_reachable = llm.remote_reachable(self.cfg)
         except Exception:
-            self._ollama_reachable = False
+            self._remote_reachable = False
 
     # -- Inställningar ---------------------------------------------------------------
 
@@ -788,7 +869,7 @@ class App:
         if self._settings is not None and self._settings.win.winfo_exists():
             self._settings.win.lift()
             return
-        # llm.installed() gör för Ollama-backend en synkron nåbarhetskoll
+        # llm.installed() gör för fjärrbackender en synkron nåbarhetskoll
         # (2 s HTTP-timeout) på huvudtråden. Kör den EN gång och återanvänd
         # svaret i både poleringspanelen och polish_ready – annars gjordes
         # kollen två gånger i rad och hela GUI:t kunde frysa ~4 s vid varje
@@ -807,14 +888,15 @@ class App:
         if self._llm_busy.is_set():
             return {"state": "Åtgärd pågår…", "kind": "warn", "action": None}
         key = (self.cfg["polish_hotkey"] or "f8").upper()
-        if self.cfg["polish_backend"] == "ollama":
+        if llm.is_remote(self.cfg):
             ok = polish_ready  # redan nåbarhetskollat i _open_settings
-            model = self.cfg["polish_ollama_model"]
+            model = llm.remote_model(self.cfg)
+            service = llm.remote_label(self.cfg)
             return {
                 "state": (
-                    f"via Ollama ({model}) – markera text och tryck {key}"
+                    f"via {service} ({model}) – markera text och tryck {key}"
                     if ok
-                    else f"via Ollama ({model}) – Ollama svarar inte"
+                    else f"via {service} ({model}) – tjänsten svarar inte"
                 ),
                 "kind": "ok" if ok else "warn",
                 "action": None,
@@ -994,7 +1076,7 @@ class App:
                 self.polish_key = None
             new_ptt = new_action = None
             try:
-                new_ptt = PushToTalk(
+                new_ptt = create_push_to_talk(
                     changes["hotkey"],
                     changes["hold_threshold_s"],
                     self._on_start,
@@ -1017,7 +1099,7 @@ class App:
                     new_ptt.stop()
                 self.hotkey = None
                 try:
-                    self.hotkey = PushToTalk(
+                    self.hotkey = create_push_to_talk(
                         old["hotkey"],
                         old["hold_threshold_s"],
                         self._on_start,
@@ -1048,7 +1130,10 @@ class App:
             # VRAM-medvetna kvantiseringen precis som ett modellbyte.
             or changes["polish_backend"] != old["polish_backend"]
         )
-        mic_changed = changes["keep_mic_open"] != old["keep_mic_open"]
+        mic_changed = (
+            changes["mic_mode"] != old["mic_mode"]
+            or changes["mic_idle_close_s"] != old["mic_idle_close_s"]
+        )
         history_persist_changed = changes["history_persist"] != old["history_persist"]
         # Fångas före update(): en ny token gör att uppdateringskollen mot ett
         # privat repo kan lyckas — kör om den nu så hämta-raden dyker upp utan
@@ -1076,9 +1161,9 @@ class App:
         # appstart med builtin-backend) och körs som vanlig liveinskrivning
         # trots att Ollama svarar; först nästa diktering hann annars uppdatera
         # cachen. Sker i bakgrunden (2 s HTTP-timeout) så Spara aldrig blockeras.
-        if self.cfg["polish_backend"] == "ollama":
+        if llm.is_remote(self.cfg):
             threading.Thread(
-                target=self._refresh_ollama_reachable, daemon=True
+                target=self._refresh_remote_reachable, daemon=True
             ).start()
         if token_changed and self.cfg["check_updates"] and self.update_release is None:
             update.check_async(
@@ -1090,8 +1175,13 @@ class App:
         for t in self.transcribers.values():
             t.initial_prompt = changes["initial_prompt"]
         if mic_changed:
-            self.recorder._keep_open = changes["keep_mic_open"]
-            threading.Thread(target=self.recorder.restart, daemon=True).start()
+            # Egen tråd: att öppna eller stänga en WASAPI-ström tar hundratals
+            # millisekunder och Spara-knappen ska inte frysa så länge.
+            threading.Thread(
+                target=self.recorder.set_mode,
+                args=(changes["mic_mode"], changes["mic_idle_close_s"]),
+                daemon=True,
+            ).start()
         self.language = changes["language"]
         if model_changed:
             # Byts inte synkront: pågående sessioner behåller sin referens,
@@ -1269,9 +1359,11 @@ class App:
                 self.overlay.show("(ingen markering)", GRAY, auto_hide_ms=1500)
                 return
             try:
-                if self.cfg["polish_backend"] == "ollama":
-                    self.overlay.show("Polerar via Ollama…", BLUE)
-                    result = llm.polish_ollama(self.cfg, text, style, self.language)
+                if llm.is_remote(self.cfg):
+                    self.overlay.show(
+                        f"Polerar via {llm.remote_label(self.cfg)}…", BLUE
+                    )
+                    result = llm.polish_remote(self.cfg, text, style, self.language)
                 else:
                     if self._polisher is None:
                         self.overlay.show("Laddar poleringsmodellen…", GRAY)
@@ -1318,6 +1410,7 @@ class App:
             self.hotkey.stop()
         if self.polish_key is not None:
             self.polish_key.stop()
+        self.recorder.close()
         self._quit.set()
 
     def _poll_quit(self) -> None:
@@ -1398,6 +1491,10 @@ def make_tray(app: App):
         pystray.MenuItem(
             "Kopiera senaste diktering",
             lambda icon, item: copy_to_clipboard(app.last_text),
+        ),
+        pystray.MenuItem(
+            "Rätta senaste dikteringen…",
+            lambda icon, item: app.request_correction(),
         ),
         pystray.MenuItem(
             "Inställningar…", lambda icon, item: app.request_settings()

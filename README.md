@@ -45,13 +45,21 @@ separate multilingual Whisper model. Audio and text are processed locally.
 ## Highlights
 
 - **Push-to-talk or toggle.** Hold the hotkey like a walkie-talkie, or tap once to start
-  and once to stop.
+  and once to stop. Bind it to a key, a key combination, or a spare mouse button
+  (thumb buttons or the wheel click).
+- **The microphone opens only when you dictate.** By default the stream is opened on the
+  hotkey and closed again a short while after the last dictation, so the Windows
+  microphone indicator is lit only while Viska is actually listening.
+- **Replacement rules.** Words the model mishears are always written correctly. Correct the
+  last dictation from the tray menu and Viska turns the difference into rules.
 - **Application-aware profiles.** Give Outlook, Visual Studio Code, a terminal, or any
   other app its own vocabulary, insertion method, language, and polishing task.
 - **Reusable writing templates.** Built-in email, commit-message, chat, formal, and concise
   templates can be edited or replaced with your own.
 - **Voice formatting.** Spoken commands such as “new line” and “new paragraph” become
   formatting instead of literal words.
+- **Measured, not guessed.** Every dictation is timed — transcription, polishing and
+  insertion — and the median is shown in advanced settings and written to the log.
 - **Clipboard-aware insertion.** Dictated text is excluded from Windows clipboard history
   and cloud clipboard sync; the previous clipboard content is restored by default.
 - **Graceful fallback.** If polishing is unavailable or times out, Viska inserts the raw
@@ -102,6 +110,7 @@ polishing currently requires the GPU path.
 | Polish selected text | **F8** | Rewrites the current selection using the app's configured template. |
 | Choose a one-off tone | Double-tap **F8** | Opens a small menu without changing saved settings. |
 | Switch language | Tray menu | Explicitly switches between Swedish and English; app profiles never change language silently. |
+| Correct the last dictation | Tray menu | Edit the text; the changed words become replacement rules for every future dictation. |
 
 The tray menu also exposes recent dictations, microphone selection, settings, update
 status, and application exit. History lives only in RAM unless disk persistence is
@@ -152,13 +161,61 @@ The table below reports that project evaluation; it is not an external benchmark
 Read the [evaluation notes and methodology](docs/eval-polering.md). Important text should
 still be reviewed before sending; small local models can make language mistakes.
 
+## Polishing without a local GPU
+
+Machines that cannot run a local model at all can send the polishing step to a remote
+service. Set `polish_backend` to `http` in advanced settings and point `polish_http_url` at
+any OpenAI-compatible `/v1/chat/completions` endpoint. Viska knows nothing about what
+answers: an API key, a company gateway, or the small server in
+[`tools/polish_server.py`](tools/polish_server.py), which keeps a Codex process warm and
+runs each rewrite through it.
+
+```bash
+uv run tools/polish_server.py --model gpt-5.6-luna
+```
+
+The server binds to `127.0.0.1:8756`, exposes `/health` and `/v1/chat/completions`, and can
+require a bearer token with `--token`. The sandbox is read-only and approvals are denied:
+the model gets no tools, only text in and text out. Each request runs in its own ephemeral
+thread, so one dictation never carries the previous one as context. Quota exhaustion is
+reported as HTTP 429 with the provider's own message, which reaches the Viska log instead
+of disappearing into a silent fallback.
+
+It also runs Codex in **its own empty `CODEX_HOME`**, with only `auth.json` copied in from
+the real one. This matters more than it sounds: plugins, MCP servers, the skills catalog
+and `AGENTS.md` are all loaded per thread from that directory, and on an everyday coding
+setup they turned one dictated sentence into 20 653 input tokens. An isolated home cut that
+to 11 559 and the round trip from 5.2 to 3.5 seconds. Use `--codex-home inherit` to opt out.
+
+Measured on one machine with `gpt-5.6-luna`, a 157-character dictation rewritten as an
+email:
+
+| Setup | Round trip | Input tokens |
+| --- | ---: | ---: |
+| User's own `CODEX_HOME` | 5.0–5.2 s | 20 653 |
+| Isolated home, first call | 5.3 s | 11 559 |
+| Isolated home, warm | 3.5 s | 11 559 |
+| Isolated home, `--service-tier priority` | 3.6 s | 6 058 |
+
+`--effort` defaults to `low` because that is the lowest level the models actually accept;
+`none` and `minimal` exist in the protocol but are rejected by the backend, which silently
+left an earlier version reasoning at the model default. Streaming the answer would show the
+first words after about 2.5 seconds instead of the whole text after 3.4, but Viska inserts
+the finished text in one go, so that is a preview improvement rather than a real speedup.
+
+Run it with `--fake` to test the wiring without spending anything.
+
+**This backend sends the dictated text off the machine.** Everything else in Viska stays
+local; this is the one setting that changes that, and it is off by default.
+
 ## Privacy model
 
 | Data | Default behaviour |
 | --- | --- |
+| Microphone | Opened on the hotkey and closed again once you stop dictating (configurable). |
 | Audio | Processed in memory and never saved. |
 | Speech recognition | Runs locally with faster-whisper. |
-| Text polishing | Runs locally with llama.cpp, or optionally against a user-configured local Ollama instance. |
+| Text polishing | Runs locally with llama.cpp, or optionally against a user-configured Ollama instance or remote endpoint (`polish_backend`). |
 | Dictation history | RAM only; disk persistence is opt-in. |
 | Clipboard | Previous content is restored; inserted text is marked to avoid Windows history and cloud sync. |
 | Network | Used for first-time model downloads and optional GitHub release checks. No telemetry. |
@@ -185,8 +242,22 @@ Useful defaults include:
 | `model` | `auto` | Large KB-Whisper on GPU, small on CPU |
 | `live` | `auto` | Enabled on GPU, disabled on CPU |
 | `inject_mode` | `paste` | Protected clipboard insertion or character-by-character typing |
+| `mic_mode` | `on_demand` | Microphone stream open only around dictation (`always`, `closed`) |
+| `mic_idle_close_s` | `20` | Seconds of silence before the stream is closed again |
+| `replacements` | `{}` | Heard phrase to written text, applied after transcription |
 | `history_persist` | `false` | Keep recent dictations in memory only |
 | `flow` | `false` | Polish full dictations before insertion |
+| `polish_backend` | `builtin` | `builtin`, `ollama`, or `http` (remote endpoint) |
+
+## Tests
+
+The pure logic — configuration migration and atomic writes, replacement rules, the rules
+derived from a correction, hotkey parsing, template resolution and the update version
+comparison — is covered by a small suite that needs neither a GPU nor a microphone:
+
+```bash
+uv run --group dev pytest
+```
 
 ## Build a portable release
 
@@ -208,7 +279,7 @@ uv run viska --check
 ```
 
 The application log is written to `%APPDATA%\viska\viska.log`. See the
-[v0.4 release notes](docs/release-notes-v0.4.0.md) for the current feature set.
+[v0.5 release notes](docs/release-notes-v0.5.0.md) for the current feature set.
 
 ## Project status
 
