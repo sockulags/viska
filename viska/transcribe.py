@@ -153,17 +153,24 @@ class Transcriber:
         list(segments)
 
     def transcribe_segments(
-        self, audio, language: str | None = "sv", initial_prompt: str | None = None
+        self,
+        audio,
+        language: str | None = "sv",
+        initial_prompt: str | None = None,
+        beam_size: int | None = None,
     ) -> list:
         """Som transcribe(), men returnerar segmentlistan med tidsstämplar —
-        liveläget behöver veta var i ljudet varje fras slutar."""
+        liveläget behöver veta var i ljudet varje fras slutar.
+
+        beam_size går att sänka per anrop: förhandsvisningen i flow-läget
+        skrivs aldrig in och behöver inte samma sökbredd som slutresultatet."""
         if language == "auto":
             language = None
         prompt = initial_prompt if initial_prompt is not None else self.initial_prompt
         segments, _info = self._model.transcribe(
             audio,
             language=language,
-            beam_size=self.beam_size,
+            beam_size=beam_size or self.beam_size,
             initial_prompt=prompt or None,
             vad_filter=True,
             # Kortare padding än batchläget: segmentslutet hamnar närmare

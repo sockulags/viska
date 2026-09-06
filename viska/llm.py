@@ -89,6 +89,13 @@ def installed(cfg: dict) -> bool:
     return model_installed(cfg) and runtime_installed()
 
 
+def installed_local(cfg: dict) -> bool:
+    """Är den INBYGGDA motorn nedladdad? Oberoende av vilken backend som är
+    vald, och utan nätverksanrop — panelen för nedladdning/borttagning ska
+    kunna ritas direkt även när en fjärrtjänst är vald."""
+    return model_installed(cfg) and runtime_installed()
+
+
 def remote_reachable(cfg: dict) -> bool:
     if cfg["polish_backend"] == "ollama":
         return ollama_reachable(cfg)

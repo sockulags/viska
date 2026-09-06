@@ -13,6 +13,7 @@ intervallet och läget stängs av ("auto" i config).
 
 import logging
 import threading
+import time
 
 import numpy as np
 
@@ -34,6 +35,7 @@ class LiveWorker:
         max_window_s: float = 18.0,
         initial_prompt: str | None = None,
         preview_only: bool = False,
+        beam_size: int | None = None,
     ):
         self.transcriber = transcriber
         self.recorder = recorder
@@ -48,6 +50,13 @@ class LiveWorker:
         # skrivs in förrän dikteringen är klar (då poleras hela transkriptet).
         # committed_frames stannar på 0 så att _finish transkriberar allt.
         self.preview_only = preview_only
+        # Sökbredd för livepassen. Flow-lägets förhandsvisning skrivs aldrig
+        # in och kan därför köra billigare än sluttranskriberingen.
+        self.beam_size = beam_size
+        # Hur lång tid förra passet tog. Nästa pass startar tidigast så långt
+        # efter det förra: tar transkriberingen längre tid än intervallet
+        # köar passen annars upp sig och GPU:n får aldrig komma ikapp.
+        self._last_pass_s = 0.0
         self.committed_frames = 0
         self._stop = threading.Event()
         self._thread = threading.Thread(
@@ -75,11 +84,14 @@ class LiveWorker:
         return self.committed_frames
 
     def _run(self) -> None:
-        while not self._stop.wait(self.interval_s):
+        while not self._stop.wait(max(self.interval_s, self._last_pass_s)):
+            t0 = time.perf_counter()
             try:
                 self._pass()
             except Exception:
                 log.exception("Livepasset misslyckades")
+            finally:
+                self._last_pass_s = time.perf_counter() - t0
 
     def _pass(self) -> None:
         audio = self.recorder.snapshot(self.committed_frames)
@@ -96,7 +108,10 @@ class LiveWorker:
         if float(np.abs(audio).max()) < 0.003:
             return
         segments = self.transcriber.transcribe_segments(
-            audio, self.language, initial_prompt=self.initial_prompt
+            audio,
+            self.language,
+            initial_prompt=self.initial_prompt,
+            beam_size=self.beam_size,
         )
         if self._stop.is_set():
             return  # stoppad under transkriberingen: resten tas batchvis

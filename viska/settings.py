@@ -9,6 +9,8 @@ tk-standardfärger (det var så Windows 2000-blandningen uppstod).
 
 import os
 import queue
+import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 
@@ -30,6 +32,15 @@ QUALITY = {
 }
 
 _LIVE_CHOICES = {"Auto (på med GPU)": "auto", "På": True, "Av": False}
+# Poleringsmotorn i klarspråk. Låg den under Avancerat som "builtin/ollama/
+# http" var den i praktiken osynlig för den som inte redan visste vad den
+# hette — och för en dator utan GPU är den valet som avgör om poleringen
+# fungerar alls.
+_ENGINE_CHOICES = {
+    "Inbyggd modell (kräver GPU)": "builtin",
+    "Ollama på den här datorn": "ollama",
+    "Egen tjänst (moln eller lokal server)": "http",
+}
 # Mikrofonläge: "Vid diktering" är förvalet — mikrofonikonen i aktivitetsfältet
 # ska bara lysa när Viska faktiskt lyssnar.
 _MIC_CHOICES = {
@@ -131,6 +142,7 @@ class SettingsWindow:
         gpu_panel: dict | None = None,
         polish_panel: dict | None = None,
         polish_ready: bool = False,
+        service: dict | None = None,
     ):
         """on_save(ändringar: dict) -> None | str (fel visas, fönstret kvar).
         Panelerna kommer från App._gpu_panel()/_polish_panel().
@@ -142,6 +154,11 @@ class SettingsWindow:
         ui.refresh_theme()
         self._on_save = on_save
         self._polish_ready = polish_ready
+        self._cfg = cfg
+        # {"running": () -> bool, "start": (cmd) -> felsträng|None, "stop": ()}
+        self._service = service
+        self._remote_widgets: dict[str, dict] = {}
+        self._remote_queue: queue.Queue = queue.Queue()
         self._orig_model = cfg["model"]
         # Tål handredigerad config: hoppa över trasiga profilposter.
         self._profiles = {
@@ -476,31 +493,18 @@ class SettingsWindow:
         adv_entry(
             "Stäng mikrofonen efter (s)", "mic_idle_close_s", cfg["mic_idle_close_s"]
         )
-        adv_combo(
-            "Poleringsbackend", "polish_backend", cfg["polish_backend"],
-            ["builtin", "ollama", "http"],
-        )
-        adv_entry("Ollama-modell", "polish_ollama_model", cfg["polish_ollama_model"])
-        adv_entry("Poleringstjänstens adress", "polish_http_url", cfg["polish_http_url"])
-        adv_entry("Modell i tjänsten", "polish_http_model", cfg["polish_http_model"])
-        self._http_token = tk.StringVar(value=str(cfg.get("polish_http_token", "") or ""))
-        holder = self._row(
-            advanced, "Nyckel till tjänsten", hint="Tom = ingen Authorization-header"
-        )
-        ttk.Entry(
-            holder, textvariable=self._http_token, width=_FIELD_W, show="•"
-        ).pack()
-        self._hint(
-            advanced,
-            "Backend \"http\" skickar texten till adressen ovan — den lämnar\n"
-            "alltså datorn. Avsedd för maskiner utan lokal poleringsmodell.",
-        )
+        adv_entry("Tonvalsmenyns tangent", "polish_menu_hotkey", cfg["polish_menu_hotkey"])
+        self._double_tap = tk.BooleanVar(value=bool(cfg["polish_double_tap"]))
         self._restore = tk.BooleanVar(value=bool(cfg["restore_clipboard"]))
         self._append = tk.BooleanVar(value=bool(cfg["append_space"]))
         self._updates = tk.BooleanVar(value=bool(cfg["check_updates"]))
         self._history_persist = tk.BooleanVar(value=bool(cfg["history_persist"]))
         ui.section(advanced, "Beteende")
         for text, var in (
+            (
+                "Tonvalsmeny på dubbeltryck (fördröjer varje polering ~0,4 s)",
+                self._double_tap,
+            ),
             ("Återställ klippbordet efter inklistring", self._restore),
             ("Mellanslag efter varje diktering", self._append),
             ("Sök efter uppdateringar vid start", self._updates),
@@ -550,6 +554,7 @@ class SettingsWindow:
         ttk.Button(
             footer, text="Spara", command=self._save, style="Accent.TButton"
         ).pack(side="right", padx=(0, 6))
+        self._poll_remote()
 
     # -- Layouthjälpare ------------------------------------------------------------
 
@@ -892,15 +897,73 @@ class SettingsWindow:
         översikt över appar med egen polering."""
         pal = self._pal
 
-        # -- Motor: status, nedladdning, "Ta bort poleringen" ------------------
+        # -- Motor: var poleringen körs ----------------------------------------
+        ui.section(parent, "Poleringsmotor")
+        self._hint(
+            parent,
+            "Markera text var som helst och tryck poleringstangenten. Utan "
+            "GPU i datorn: välj \"Egen tjänst\" och peka den på en\n"
+            "poleringsserver — då körs omskrivningen där i stället.",
+        )
+        reverse_engine = {v: k for k, v in _ENGINE_CHOICES.items()}
+        self._engine = tk.StringVar(
+            value=reverse_engine.get(cfg["polish_backend"], list(_ENGINE_CHOICES)[0])
+        )
+        holder = self._row(parent, "Motor")
+        engine_combo = ttk.Combobox(
+            holder, textvariable=self._engine, values=list(_ENGINE_CHOICES),
+            state="readonly", width=_FIELD_W - 2,
+        )
+        engine_combo.pack()
+        engine_combo.bind("<<ComboboxSelected>>", lambda _e: self._show_engine_block())
+
+        self._engine_blocks: dict[str, tk.Frame] = {}
+
+        block = tk.Frame(parent, bg=pal["window"])
+        self._engine_blocks["builtin"] = block
         if polish_panel is not None:
-            ui.section(parent, "Poleringsmotor")
-            self._hint(
-                parent,
-                "Markera text var som helst, tryck tangenten, få den omskriven "
-                "lokalt. Toner för en enskild polering väljs med dubbeltryck.",
-            )
-            _ActionPanel(parent, self.win, polish_panel)
+            _ActionPanel(block, self.win, polish_panel)
+
+        block = tk.Frame(parent, bg=pal["window"])
+        self._engine_blocks["ollama"] = block
+        self._ollama_model = tk.StringVar(value=cfg["polish_ollama_model"])
+        holder = self._row(block, "Modell i Ollama")
+        ttk.Entry(holder, textvariable=self._ollama_model, width=_FIELD_W).pack()
+        self._ollama_url = tk.StringVar(value=cfg["polish_ollama_url"])
+        holder = self._row(block, "Ollamas adress")
+        ttk.Entry(holder, textvariable=self._ollama_url, width=_FIELD_W).pack()
+        self._build_remote_tools(block, "ollama")
+
+        block = tk.Frame(parent, bg=pal["window"])
+        self._engine_blocks["http"] = block
+        self._http_url = tk.StringVar(value=cfg["polish_http_url"])
+        holder = self._row(block, "Tjänstens adress")
+        ttk.Entry(holder, textvariable=self._http_url, width=_FIELD_W).pack()
+        self._http_model = tk.StringVar(value=cfg["polish_http_model"])
+        holder = self._row(block, "Modell i tjänsten")
+        ttk.Entry(holder, textvariable=self._http_model, width=_FIELD_W).pack()
+        self._http_token = tk.StringVar(value=str(cfg.get("polish_http_token") or ""))
+        holder = self._row(
+            block, "Nyckel", hint="Tom = ingen Authorization-header"
+        )
+        ttk.Entry(
+            holder, textvariable=self._http_token, width=_FIELD_W, show="•"
+        ).pack()
+        self._http_command = tk.StringVar(value=str(cfg.get("polish_http_command") or ""))
+        holder = self._row(
+            block,
+            "Startkommando",
+            hint="Lokal server som Viska får starta och stoppa",
+        )
+        ttk.Entry(holder, textvariable=self._http_command, width=_FIELD_W).pack()
+        self._build_service_row(block)
+        self._build_remote_tools(block, "http")
+        self._hint(
+            block,
+            "Med den här motorn lämnar den polerade texten datorn. Allt annat "
+            "i Viska stannar lokalt.",
+        )
+        self._show_engine_block()
 
         # -- Global standard: mall eller Egen text -----------------------------
         ui.section(parent, "Global standard")
@@ -1001,6 +1064,174 @@ class SettingsWindow:
         )
         self._polish_overview.pack(fill="x")
         self._refresh_polish_overview()
+
+    # -- Poleringsmotorns block ----------------------------------------------------
+
+    def _show_engine_block(self) -> None:
+        """Visar bara den valda motorns inställningar. Blocken byggs en gång
+        och packas om — att bygga om fliken vid varje byte hade tappat allt
+        annat man hunnit skriva i den."""
+        chosen = _ENGINE_CHOICES.get(self._engine.get(), "builtin")
+        for name, block in self._engine_blocks.items():
+            if name == chosen:
+                block.pack(fill="x", pady=(2, 0))
+            else:
+                block.pack_forget()
+        if chosen in ("ollama", "http"):
+            self._probe_remote(chosen)
+
+    def _build_remote_tools(self, parent, backend: str) -> None:
+        """Anslutningsstatus + "Testa polering" med en redigerbar mening.
+
+        Allt arbete sker i en tråd och levereras via kön som _poll_remote
+        tömmer i huvudtråden — en tjänst som inte svarar får inte frysa
+        fönstret, vilket var precis vad den gamla synkrona kollen gjorde."""
+        pal = self._pal
+        status = tk.Label(
+            parent, text="Kontrollerar anslutningen…", bg=pal["window"],
+            fg=pal["muted"], font=("Segoe UI", 8), anchor="w", justify="left",
+        )
+        status.pack(fill="x", pady=(6, 0))
+        row = tk.Frame(parent, bg=pal["window"])
+        row.pack(fill="x", pady=(4, 0))
+        ttk.Button(
+            row, text="Kontrollera igen",
+            command=lambda: self._probe_remote(backend),
+        ).pack(side="left")
+        ttk.Button(
+            row, text="Testa polering",
+            command=lambda: self._test_remote(backend),
+        ).pack(side="left", padx=(6, 0))
+        sample = ui.themed_text(parent, width=54, height=2, wrap="word")
+        sample.pack(fill="x", pady=(6, 2))
+        sample.insert("1.0", self._cfg.get("polish_test_text", ""))
+        result = tk.Label(
+            parent, text="", bg=pal["window"], fg=pal["muted"],
+            font=("Segoe UI", 8), anchor="w", justify="left", wraplength=460,
+        )
+        result.pack(fill="x")
+        self._remote_widgets[backend] = {
+            "status": status, "sample": sample, "result": result
+        }
+
+    def _build_service_row(self, parent) -> None:
+        pal = self._pal
+        row = tk.Frame(parent, bg=pal["window"])
+        row.pack(fill="x", pady=(6, 0))
+        self._service_btn = ttk.Button(
+            row, text="Starta tjänsten", command=self._toggle_service
+        )
+        self._service_btn.pack(side="left")
+        self._service_status = tk.Label(
+            row, text="", bg=pal["window"], fg=pal["muted"],
+            font=("Segoe UI", 8), anchor="w",
+        )
+        self._service_status.pack(side="left", padx=(8, 0))
+        self._refresh_service_row()
+
+    def _refresh_service_row(self) -> None:
+        if self._service is None:
+            self._service_btn.config(state="disabled")
+            self._service_status.config(text="(inte tillgängligt)")
+            return
+        running = bool(self._service["running"]())
+        self._service_btn.config(
+            text="Stoppa tjänsten" if running else "Starta tjänsten",
+            state="normal" if self._http_command.get().strip() else "disabled",
+        )
+        self._service_status.config(text="kör" if running else "stoppad")
+
+    def _toggle_service(self) -> None:
+        if self._service is None:
+            return
+        if self._service["running"]():
+            self._service["stop"]()
+        else:
+            error = self._service["start"](self._http_command.get().strip())
+            if error:
+                self._error.config(text=error)
+                return
+            self._error.config(text="")
+        self._refresh_service_row()
+        # Tjänsten behöver ett ögonblick på sig innan den svarar.
+        self.win.after(1200, lambda: self._probe_remote("http"))
+
+    # -- Nåbarhet och testpolering i bakgrunden ------------------------------------
+
+    def _engine_cfg(self) -> dict:
+        """Config som den skulle se ut om man sparade nu — så att statuskoll
+        och test använder adressen man just skrivit in, inte den sparade."""
+        return {
+            **self._cfg,
+            "polish_backend": _ENGINE_CHOICES.get(self._engine.get(), "builtin"),
+            "polish_ollama_model": self._ollama_model.get().strip(),
+            "polish_ollama_url": self._ollama_url.get().strip(),
+            "polish_http_url": self._http_url.get().strip(),
+            "polish_http_model": self._http_model.get().strip(),
+            "polish_http_token": self._http_token.get().strip(),
+        }
+
+    def _probe_remote(self, backend: str) -> None:
+        widgets = self._remote_widgets.get(backend)
+        if widgets is None:
+            return
+        widgets["status"].config(text="Kontrollerar anslutningen…")
+        cfg = {**self._engine_cfg(), "polish_backend": backend}
+
+        def work():
+            try:
+                ok = llm.remote_reachable(cfg)
+            except Exception:
+                ok = False
+            name = llm.remote_label(cfg)
+            model = llm.remote_model(cfg) or "(ingen modell vald)"
+            text = (
+                f"Ansluten till {name} – modell {model}"
+                if ok
+                else f"{name} svarar inte. Kontrollera adressen, och att "
+                "tjänsten är igång."
+            )
+            self._remote_queue.put((backend, "status", text))
+
+        threading.Thread(target=work, daemon=True, name="viska-probe").start()
+
+    def _test_remote(self, backend: str) -> None:
+        widgets = self._remote_widgets.get(backend)
+        if widgets is None:
+            return
+        text = widgets["sample"].get("1.0", "end").strip()
+        if not text:
+            widgets["result"].config(text="Skriv en mening att testa med först.")
+            return
+        widgets["result"].config(text="Polerar…")
+        cfg = {**self._engine_cfg(), "polish_backend": backend}
+        style = llm.resolve_polish_prompt(cfg)
+
+        def work():
+            t0 = time.perf_counter()
+            try:
+                out = llm.polish_remote(cfg, text, style, "sv")
+                # Decimalkommat sätts på SIFFRAN. En replace på hela
+                # meddelandet träffade första punkten i den polerade texten.
+                seconds = f"{time.perf_counter() - t0:.1f}".replace(".", ",")
+                msg = f"{out}\n\nSvarstid {seconds} s"
+            except Exception as e:  # noqa: BLE001
+                msg = f"Testet misslyckades: {e}"
+            self._remote_queue.put((backend, "result", msg))
+
+        threading.Thread(target=work, daemon=True, name="viska-polishtest").start()
+
+    def _poll_remote(self) -> None:
+        try:
+            while True:
+                backend, kind, text = self._remote_queue.get_nowait()
+                widgets = self._remote_widgets.get(backend)
+                if widgets is not None:
+                    widgets[kind].config(text=text)
+        except queue.Empty:
+            pass
+        if self.win.winfo_exists():
+            self.win.after(150, self._poll_remote)
 
     def _toggle_global_polish_text(self) -> None:
         if self._global_polish_choice.get() == _OWN_TEXT:
@@ -1163,6 +1394,19 @@ class SettingsWindow:
             "restore_clipboard": self._restore.get(),
             "append_space": self._append.get(),
             "mic_mode": _MIC_CHOICES[self._mic_mode.get()],
+            "polish_backend": _ENGINE_CHOICES.get(self._engine.get(), "builtin"),
+            "polish_ollama_model": self._ollama_model.get().strip() or "qwen3.5:9b",
+            "polish_ollama_url": (
+                self._ollama_url.get().strip() or "http://localhost:11434"
+            ),
+            "polish_http_url": (
+                self._http_url.get().strip()
+                or "http://127.0.0.1:8756/v1/chat/completions"
+            ),
+            "polish_http_model": self._http_model.get().strip() or "gpt-5.6-luna",
+            "polish_http_token": self._http_token.get().strip(),
+            "polish_http_command": self._http_command.get().strip(),
+            "polish_double_tap": self._double_tap.get(),
             "replacements": dict(self._replacements),
             "check_updates": self._updates.get(),
             "history_persist": self._history_persist.get(),
@@ -1197,21 +1441,12 @@ class SettingsWindow:
             self._adv["mic_idle_close_s"].get().replace(",", ".") or 20
         )
         changes["polish_hotkey"] = self._adv["polish_hotkey"].get().strip() or "f8"
-        backend = self._adv["polish_backend"].get().strip()
-        changes["polish_backend"] = (
-            backend if backend in ("builtin", "ollama", "http") else "builtin"
-        )
-        changes["polish_ollama_model"] = (
-            self._adv["polish_ollama_model"].get().strip() or "qwen3.5:9b"
-        )
-        changes["polish_http_url"] = (
-            self._adv["polish_http_url"].get().strip()
-            or "http://127.0.0.1:8756/v1/chat/completions"
-        )
-        changes["polish_http_model"] = (
-            self._adv["polish_http_model"].get().strip() or "gpt-5.6-luna"
-        )
-        changes["polish_http_token"] = self._http_token.get().strip()
+        changes["polish_menu_hotkey"] = self._adv["polish_menu_hotkey"].get().strip()
+        for backend, widgets in self._remote_widgets.items():
+            if backend == changes["polish_backend"]:
+                changes["polish_test_text"] = widgets["sample"].get(
+                    "1.0", "end"
+                ).strip()
         return changes
 
     def _save(self) -> None:
@@ -1239,9 +1474,24 @@ class SettingsWindow:
                 text="Poleringstangenten kan inte vara en musknapp."
             )
             return
-        if changes["hotkey"] == changes["polish_hotkey"]:
+        menu_key = changes["polish_menu_hotkey"]
+        if menu_key:
+            try:
+                parse_hotkey(menu_key)
+            except HotkeyError as e:
+                self._error.config(text=str(e))
+                return
+            if is_mouse(menu_key):
+                self._error.config(
+                    text="Tonvalsmenyn kan inte ligga på en musknapp."
+                )
+                return
+        bindings = [changes["hotkey"], changes["polish_hotkey"]] + (
+            [menu_key] if menu_key else []
+        )
+        if len(set(bindings)) != len(bindings):
             self._error.config(
-                text="Diktering och polering kan inte ha samma tangent."
+                text="Diktering, polering och tonvalsmeny måste ha olika tangenter."
             )
             return
         error = self._on_save(changes)
