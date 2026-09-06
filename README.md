@@ -171,17 +171,37 @@ answers: an API key, a company gateway, or the small server in
 runs each rewrite through it.
 
 ```bash
-uv run tools/polish_server.py --model gpt-5.6-luna --effort none
+uv run tools/polish_server.py --model gpt-5.6-luna
 ```
 
 The server binds to `127.0.0.1:8756`, exposes `/health` and `/v1/chat/completions`, and can
-require a bearer token with `--token`. It overrides the user's own Codex configuration —
-model, reasoning effort, sandbox and instructions are all set explicitly — so a coding
-setup with large developer instructions does not end up prepended to every dictation. The
-sandbox is read-only and approvals are denied: the model gets no tools, only text in and
-text out. Each request runs in its own ephemeral thread, so one dictation never carries
-the previous one as context. Quota exhaustion is reported as HTTP 429 with the provider's
-own message, which reaches the Viska log instead of disappearing into a silent fallback.
+require a bearer token with `--token`. The sandbox is read-only and approvals are denied:
+the model gets no tools, only text in and text out. Each request runs in its own ephemeral
+thread, so one dictation never carries the previous one as context. Quota exhaustion is
+reported as HTTP 429 with the provider's own message, which reaches the Viska log instead
+of disappearing into a silent fallback.
+
+It also runs Codex in **its own empty `CODEX_HOME`**, with only `auth.json` copied in from
+the real one. This matters more than it sounds: plugins, MCP servers, the skills catalog
+and `AGENTS.md` are all loaded per thread from that directory, and on an everyday coding
+setup they turned one dictated sentence into 20 653 input tokens. An isolated home cut that
+to 11 559 and the round trip from 5.2 to 3.5 seconds. Use `--codex-home inherit` to opt out.
+
+Measured on one machine with `gpt-5.6-luna`, a 157-character dictation rewritten as an
+email:
+
+| Setup | Round trip | Input tokens |
+| --- | ---: | ---: |
+| User's own `CODEX_HOME` | 5.0–5.2 s | 20 653 |
+| Isolated home, first call | 5.3 s | 11 559 |
+| Isolated home, warm | 3.5 s | 11 559 |
+| Isolated home, `--service-tier priority` | 3.6 s | 6 058 |
+
+`--effort` defaults to `low` because that is the lowest level the models actually accept;
+`none` and `minimal` exist in the protocol but are rejected by the backend, which silently
+left an earlier version reasoning at the model default. Streaming the answer would show the
+first words after about 2.5 seconds instead of the whole text after 3.4, but Viska inserts
+the finished text in one go, so that is a preview improvement rather than a real speedup.
 
 Run it with `--fake` to test the wiring without spending anything.
 

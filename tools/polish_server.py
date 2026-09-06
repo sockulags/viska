@@ -23,11 +23,16 @@ Designval värda att känna till:
   poleringen släpat med sig nio tidigare mejl i kontexten — dyrare, tröge
   och med risk att modellen blandar ihop dem.
 
-- ANVÄNDARENS EGEN CODEX-KONFIGURATION ÖVERSTYRS. En vanlig config.toml för
-  kodning kan innehålla stora developer_instructions, en resonerande modell
-  och en tillåtande sandlåda. Allt det skulle skickas med vid varje
-  omskrivning av ett dikterat mejl. Därför sätts base_instructions,
-  developer_instructions, modell, sandlåda och resonemangsnivå explicit här.
+- EGET CODEX_HOME. Att överstyra instruktionerna per tråd räcker inte:
+  plugins, MCP-servrar, skills-katalogen och AGENTS.md kommer från
+  användarens CODEX_HOME och skickas med i VARJE tråd. Mätt på en vanlig
+  kodningsuppsättning blev en dikterad mening 20 653 input-tokens. Därför
+  kör servern mot ett eget, tomt CODEX_HOME dit bara auth.json kopieras.
+  --codex-home inherit stänger av det och använder användarens riktiga.
+
+- ÖVRIGT ÖVERSTYRS PER TRÅD. base_instructions, developer_instructions,
+  modell, sandlåda och resonemangsnivå sätts explicit vid varje thread_start
+  så att inget av användarens kodningsupplägg läcker in.
 
 - INGA VERKTYG. Sandlådan är read-only och godkännanden nekas, så en modell
   som ändå försöker köra något får nej. Uppgiften är text in, text ut.
@@ -40,15 +45,41 @@ Designval värda att känna till:
 import argparse
 import json
 import logging
+import os
+import shutil
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 log = logging.getLogger("polish-server")
 
 # Räcker för en diktering; längre än så är det inte en diktering.
 MAX_BODY_BYTES = 256 * 1024
+
+# Ett tomt hem utan plugins, MCP-servrar, skills eller AGENTS.md. Innehållet
+# är verifierat mot `codex app-server --strict-config` på 0.146: skills.
+# max_context_tokens och tools.view_image finns inte och avvisas, medan
+# [features]-tabellen tar emot vilket namn som helst utan att klaga (den är
+# fri form, så ett namn som byter sig i en ny version gör servern långsammare
+# men aldrig trasig). web_search vill ha en av disabled/cached/indexed/live.
+ISOLATED_CONFIG = """# Skapad av Viskas poleringsserver. Redigera inte för hand.
+approval_policy = "never"
+sandbox_mode = "read-only"
+web_search = "disabled"
+
+[features]
+multi_agent = false
+shell_tool = false
+unified_exec = false
+
+[skills]
+max_context_tokens = 0
+
+[tools]
+view_image = false
+"""
 
 DEFAULT_INSTRUCTIONS = (
     "You are a text rewriting engine embedded in a dictation tool. "
@@ -64,10 +95,17 @@ class PolishBackend:
     """Codex-klienten och dess livscykel. Trådsäker: Viska gör ett anrop i
     taget, men hälsokollen kan komma parallellt."""
 
-    def __init__(self, model: str, effort: str, service_tier: str | None):
+    def __init__(
+        self,
+        model: str,
+        effort: str,
+        service_tier: str | None,
+        codex_home: Path | None = None,
+    ):
         self.model = model
         self.effort = effort
         self.service_tier = service_tier
+        self.codex_home = codex_home
         self._codex = None
         self._lock = threading.Lock()
 
@@ -77,13 +115,17 @@ class PolishBackend:
         self._ensure_client()
 
     def _ensure_client(self):
-        from openai_codex import Codex
+        from openai_codex import Codex, CodexConfig
 
         with self._lock:
             if self._codex is None:
+                env = None
+                if self.codex_home is not None:
+                    provision_home(self.codex_home)
+                    env = {**os.environ, "CODEX_HOME": str(self.codex_home)}
                 log.info("Startar Codex app-server…")
                 t0 = time.perf_counter()
-                self._codex = Codex()
+                self._codex = Codex(CodexConfig(env=env, cwd=str(self.codex_home or Path.cwd())))
                 log.info("Codex redo på %.2f s", time.perf_counter() - t0)
             return self._codex
 
@@ -121,7 +163,39 @@ class PolishBackend:
         answer = (getattr(result, "final_response", "") or "").strip()
         if not answer:
             raise BackendError("Codex svarade utan text")
+        usage = getattr(getattr(result, "usage", None), "last", None)
+        if usage is not None:
+            # Input-tokens är måttet som avslöjar om något stort smugit sig in
+            # i prompten igen (plugins, skills, MCP-servrar).
+            log.info(
+                "Tokens: %s in (%s cachade), %s ut",
+                getattr(usage, "input_tokens", "?"),
+                getattr(usage, "cached_input_tokens", "?"),
+                getattr(usage, "output_tokens", "?"),
+            )
         return answer
+
+
+def user_codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+
+
+def provision_home(home: Path) -> None:
+    """Gör hemmet redo: vår config och en färsk kopia av inloggningen.
+
+    auth.json kopieras i stället för att delas — Codex skriver om filen när
+    token förnyas, och en delad fil hade kunnat skrivas sönder av två
+    processer. Kopian tas om vid varje start, så en förnyad inloggning i det
+    riktiga hemmet följer med nästa gång servern startas."""
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.toml").write_text(ISOLATED_CONFIG, encoding="utf-8")
+    source = user_codex_home() / "auth.json"
+    if not source.exists():
+        raise BackendError(
+            f"hittar ingen inloggning i {source} – kör `codex login` först"
+        )
+    shutil.copy2(source, home / "auth.json")
+    log.info("Använder eget CODEX_HOME: %s", home)
 
 
 class FakeBackend:
@@ -130,6 +204,7 @@ class FakeBackend:
 
     def __init__(self, model: str, *_a, **_kw):
         self.model = model
+        self.codex_home = None
 
     def start(self) -> None:
         log.warning("Kör i FAKE-läge: ingen riktig modell anropas")
@@ -301,10 +376,26 @@ def main() -> int:
     parser.add_argument("--model", default="gpt-5.6-luna")
     parser.add_argument(
         "--effort",
-        default="none",
-        help="resonemangsnivå; none är det som gör skillnad på latensen",
+        default="low",
+        help=(
+            "resonemangsnivå. low är lägsta nivån modellerna faktiskt stöder; "
+            "none och minimal avvisas av backenden"
+        ),
     )
-    parser.add_argument("--service-tier", default=None)
+    parser.add_argument(
+        "--codex-home",
+        default="",
+        help=(
+            "katalog att köra Codex i (skapas). Tomt = ett eget hem under "
+            "LOCALAPPDATA, vilket håller plugins, MCP-servrar och skills "
+            "borta från varje polering. \"inherit\" använder ditt riktiga."
+        ),
+    )
+    parser.add_argument(
+        "--service-tier",
+        default=None,
+        help='"priority" ger 1,5x hastighet men drar mer av kvoten',
+    )
     parser.add_argument(
         "--token", default="", help="krävs som Bearer-nyckel om den sätts"
     )
@@ -327,8 +418,23 @@ def main() -> int:
             args.host,
         )
 
+    if args.codex_home == "inherit":
+        home = None
+        log.warning(
+            "Kör mot ditt riktiga CODEX_HOME: plugins, MCP-servrar och skills "
+            "följer med i varje polering och kostar både tid och tokens"
+        )
+    elif args.codex_home:
+        home = Path(args.codex_home)
+    else:
+        home = (
+            Path(os.environ.get("LOCALAPPDATA") or Path.home())
+            / "viska-polish"
+            / "codex-home"
+        )
+
     backend_cls = FakeBackend if args.fake else PolishBackend
-    backend = backend_cls(args.model, args.effort, args.service_tier)
+    backend = backend_cls(args.model, args.effort, args.service_tier, home)
     try:
         backend.start()
     except Exception:
