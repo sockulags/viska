@@ -165,52 +165,29 @@ still be reviewed before sending; small local models can make language mistakes.
 
 ## Polishing without a local GPU
 
-Machines that cannot run a local model at all can send the polishing step to a remote
-service. Pick **Egen tjänst** as the engine under Polishing and point it at any OpenAI-compatible
-`/v1/chat/completions` endpoint. The same tab shows whether the service answers and can
-polish a sample sentence for you, timing the round trip. Fill in a start command and Viska
-starts and stops the local service for you. Viska knows nothing about what
-answers: an API key, a company gateway, or the small server in
-[`tools/polish_server.py`](tools/polish_server.py), which keeps a Codex process warm and
-runs each rewrite through it.
+If you have Codex installed and signed in, pick **Codex** as the engine under Polishing.
+That is the whole setup: no address, no server to start, no key. Viska runs its own Codex
+process in the background, keeps it warm between dictations and shuts it down on exit.
 
-```bash
-uv run tools/polish_server.py --model gpt-5.6-luna
-```
+It runs Codex in **its own empty `CODEX_HOME`** (`%APPDATA%iska\codex-home`), holding
+nothing but our config and a copy of the login. This matters more than it sounds: plugins,
+MCP servers, the skills catalog and `AGENTS.md` are loaded per thread from that directory,
+and on an everyday coding setup they turned one dictated sentence into 20 653 input tokens.
+An isolated home cut that to 11 559 and the round trip from 5.2 to 3.5 seconds. Each
+rewrite gets its own ephemeral thread, so one dictation never carries the previous one as
+context. The sandbox is read-only and approvals are denied: the model gets no tools.
 
-The server binds to `127.0.0.1:8756`, exposes `/health` and `/v1/chat/completions`, and can
-require a bearer token with `--token`. The sandbox is read-only and approvals are denied:
-the model gets no tools, only text in and text out. Each request runs in its own ephemeral
-thread, so one dictation never carries the previous one as context. Quota exhaustion is
-reported as HTTP 429 with the provider's own message, which reaches the Viska log instead
-of disappearing into a silent fallback.
+Reasoning effort defaults to `low` — the lowest level the models actually accept, and the
+setting that decides whether a rewrite takes three seconds or ten. Viska uses the Codex
+binary you already have rather than the 354 MB copy the SDK would bring along.
 
-It also runs Codex in **its own empty `CODEX_HOME`**, with only `auth.json` copied in from
-the real one. This matters more than it sounds: plugins, MCP servers, the skills catalog
-and `AGENTS.md` are all loaded per thread from that directory, and on an everyday coding
-setup they turned one dictated sentence into 20 653 input tokens. An isolated home cut that
-to 11 559 and the round trip from 5.2 to 3.5 seconds. Use `--codex-home inherit` to opt out.
+**Egen tjänst** remains for a ready-made endpoint: a company gateway or your own server
+speaking OpenAI-compatible `/v1/chat/completions`. Paste the address, and the same page
+shows whether it answers.
 
-Measured on one machine with `gpt-5.6-luna`, a 157-character dictation rewritten as an
-email:
+Both engines send the text off the machine, which is stated plainly in the interface, and
+neither is selected by default.
 
-| Setup | Round trip | Input tokens |
-| --- | ---: | ---: |
-| User's own `CODEX_HOME` | 5.0–5.2 s | 20 653 |
-| Isolated home, first call | 5.3 s | 11 559 |
-| Isolated home, warm | 3.5 s | 11 559 |
-| Isolated home, `--service-tier priority` | 3.6 s | 6 058 |
-
-`--effort` defaults to `low` because that is the lowest level the models actually accept;
-`none` and `minimal` exist in the protocol but are rejected by the backend, which silently
-left an earlier version reasoning at the model default. Streaming the answer would show the
-first words after about 2.5 seconds instead of the whole text after 3.4, but Viska inserts
-the finished text in one go, so that is a preview improvement rather than a real speedup.
-
-Run it with `--fake` to test the wiring without spending anything.
-
-**This backend sends the dictated text off the machine.** Everything else in Viska stays
-local; this is the one setting that changes that, and it is off by default.
 
 ## Privacy model
 
@@ -219,7 +196,7 @@ local; this is the one setting that changes that, and it is off by default.
 | Microphone | Opened on the hotkey and closed again once you stop dictating (configurable). |
 | Audio | Processed in memory and never saved. |
 | Speech recognition | Runs locally with faster-whisper. |
-| Text polishing | Runs locally with llama.cpp, or optionally against a user-configured Ollama instance or remote endpoint (`polish_backend`). |
+| Text polishing | Runs locally with llama.cpp, or — if you choose it — through Codex or a remote endpoint (`polish_backend`). |
 | Dictation history | RAM only; disk persistence is opt-in. |
 | Clipboard | Previous content is restored; inserted text is marked to avoid Windows history and cloud sync. |
 | Network | Used for first-time model downloads and optional GitHub release checks. No telemetry. |
@@ -232,8 +209,9 @@ offline. Automatic update checks can be disabled in advanced settings.
 The settings window has five pages in a side menu:
 
 - **Dictation:** language, hotkey, microphone mode, live behaviour, quality and sounds
-- **Polishing:** engine with connection status, default style, style library, automatic
-  polishing, and a test area that times a sample sentence
+- **Polishing:** engine (built-in model, Codex, Ollama or your own service) with live
+  status, default style, style library, automatic polishing, and a test area that times a
+  sample sentence
 - **App profiles:** how individual programs deviate from the global settings, with every
   inherited value spelled out
 - **Words and replacements:** vocabulary and replacement rules
@@ -257,7 +235,7 @@ Useful defaults include:
 | `replacements` | `{}` | Heard phrase to written text, applied after transcription |
 | `history_persist` | `false` | Keep recent dictations in memory only |
 | `flow` | `false` | Polish full dictations before insertion |
-| `polish_backend` | `builtin` | `builtin`, `ollama`, or `http` (remote endpoint) |
+| `polish_backend` | `builtin` | `builtin`, `codex`, `ollama`, or `http` |
 
 ## Tests
 
@@ -289,7 +267,7 @@ uv run viska --check
 ```
 
 The application log is written to `%APPDATA%\viska\viska.log`. See the
-[v0.7 release notes](docs/release-notes-v0.7.0.md) for the current feature set.
+[v0.8 release notes](docs/release-notes-v0.8.0.md) for the current feature set.
 
 ## Project status
 

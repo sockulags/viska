@@ -75,20 +75,11 @@ def window(root, service_url):
     cfg = dict(config.DEFAULTS)
     cfg["polish_backend"] = "http"
     cfg["polish_http_url"] = f"{service_url}/v1/chat/completions"
-    cfg["polish_http_command"] = "cmd /c echo hej"
     cfg["app_profiles"] = {"code.exe": {"flow": False, "language": "en"}}
-    state = {"running": False, "command": None}
-    service = {
-        "running": lambda: state["running"],
-        "start": lambda cmd: state.update(running=True, command=cmd) or None,
-        "stop": lambda: state.update(running=False),
-    }
     saved: dict = {}
-    win = SettingsWindow(
-        root, cfg, lambda changes: saved.update(changes) or None, service=service
-    )
+    win = SettingsWindow(root, cfg, lambda changes: saved.update(changes) or None)
     root.update()
-    yield win, saved, state
+    yield win, saved, {}
     if win.win.winfo_exists():
         win._closing = True
         win.win.destroy()
@@ -206,16 +197,6 @@ def test_testresultatet_gar_inte_att_redigera(window):
     assert str(win._test_result.cget("state")) == "disabled"
 
 
-def test_tjansten_startas_och_stoppas(window, root):
-    win, _saved, state = window
-    win._toggle_service()
-    root.update()
-    assert state["running"] and state["command"] == "cmd /c echo hej"
-    win._toggle_service()
-    root.update()
-    assert not state["running"]
-
-
 # -- Sparande ------------------------------------------------------------------
 
 
@@ -224,7 +205,6 @@ def test_vardena_foljer_med(window):
     values = win.values()
     assert values["polish_backend"] == "http"
     assert values["polish_http_url"].endswith("/v1/chat/completions")
-    assert values["polish_http_command"] == "cmd /c echo hej"
     assert values["polish_double_tap"] is False
     assert values["polish_menu_hotkey"] == "shift+f8"
 
@@ -391,5 +371,47 @@ def test_misslyckat_test_visas_i_rutan(root):
     assert _wait_for(
         root, lambda: "misslyckades" in win._test_result.get("1.0", "end")
     )
+    win._closing = True
+    win.win.destroy()
+
+
+# -- Codex som motor -----------------------------------------------------------
+
+
+def test_codex_ar_ett_val_utan_adressfalt(root):
+    """Poängen med Codex-motorn: inget att koppla ihop. Blocket ska visa
+    modell och tankenivå — men ingen adress, nyckel eller startkommando."""
+    cfg = dict(config.DEFAULTS)
+    cfg["polish_backend"] = "codex"
+    win = SettingsWindow(root, cfg, lambda _c: None)
+    root.update()
+    assert "codex" in win._engine_blocks
+    assert win._engine_blocks["codex"].winfo_manager() == "pack"
+    labels = [
+        w.cget("text")
+        for w in win._engine_blocks["codex"].winfo_children()
+        for w in w.winfo_children()
+        for w in w.winfo_children()
+        if isinstance(w, tk.Label)
+    ]
+    assert "Modell" in labels
+    assert not any("adress" in str(t).lower() for t in labels)
+    values = win.values()
+    assert values["polish_backend"] == "codex"
+    assert values["polish_codex_model"]
+    assert values["polish_codex_effort"] in ("low", "medium", "high")
+    win._closing = True
+    win.win.destroy()
+
+
+def test_codex_status_visas_i_klartext(root, monkeypatch):
+    from viska import codex as codex_mod
+
+    monkeypatch.setattr(codex_mod, "status", lambda: (False, "Codex hittades inte"))
+    cfg = dict(config.DEFAULTS)
+    cfg["polish_backend"] = "codex"
+    win = SettingsWindow(root, cfg, lambda _c: None)
+    status = win._remote_widgets["codex"]["status"]
+    assert _wait_for(root, lambda: "hittades inte" in status.cget("text"))
     win._closing = True
     win.win.destroy()
