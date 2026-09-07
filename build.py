@@ -20,6 +20,11 @@ sys.path.insert(0, str(ROOT))
 
 from viska import __version__  # noqa: E402
 
+# Codex-SDK:n drar in en egen kopia av Codex-binären på 354 MB. Viska använder
+# den Codex användaren redan har installerad (viska.codex.binary), så paketet
+# ska inte med i bygget — annars fyrdubblas nedladdningen.
+EXCLUDED_PACKAGES = ("codex_cli_bin",)
+
 
 def make_icon() -> Path:
     from viska.app import _make_icon_image
@@ -65,6 +70,7 @@ def main() -> None:
             # sv-ttk har temat som tcl-filer
             "--collect-data", "faster_whisper",
             "--collect-data", "sv_ttk",
+            *[arg for pkg in EXCLUDED_PACKAGES for arg in ("--exclude-module", pkg)],
             str(ROOT / "run_viska.py"),
         ],
         check=True,
@@ -75,6 +81,14 @@ def main() -> None:
     # "Ladda ner polering" i stället för att blåsa upp universalpaketet.
     # Python-skalet (llama_cpp-paketet) följer med; motorn pekas ut i
     # körning via LLAMA_CPP_LIB_PATH.
+    for package in EXCLUDED_PACKAGES:
+        # --exclude-module stoppar importen men PyInstaller kan ändå ha
+        # samlat in paketets datafiler; binären ska bort ur bygget.
+        leftover = dist / "_internal" / package
+        if leftover.is_dir():
+            size_mb = sum(f.stat().st_size for f in leftover.rglob("*")) // 1_000_000
+            shutil.rmtree(leftover)
+            print(f"Städade bort {package} ({size_mb} MB) – Viska använder din egen Codex")
     llama_lib = dist / "_internal" / "llama_cpp" / "lib"
     if llama_lib.is_dir():
         size_mb = sum(f.stat().st_size for f in llama_lib.rglob("*")) // 1_000_000

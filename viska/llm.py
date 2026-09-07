@@ -76,7 +76,7 @@ def runtime_installed() -> bool:
 
 # Backends som inte kör i vår egen process. De delar inte VRAM med Whisper,
 # de kan inte förladdas, och "installerad" betyder för dem "svarar den?".
-REMOTE_BACKENDS = ("ollama", "http")
+REMOTE_BACKENDS = ("ollama", "http", "codex")
 
 
 def is_remote(cfg: dict) -> bool:
@@ -101,10 +101,16 @@ def remote_reachable(cfg: dict) -> bool:
         return ollama_reachable(cfg)
     if cfg["polish_backend"] == "http":
         return http_reachable(cfg)
+    if cfg["polish_backend"] == "codex":
+        from viska import codex
+
+        return codex.ready()
     return False
 
 
 def polish_remote(cfg: dict, text: str, style: str = "", lang: str = "sv") -> str:
+    """Codex hanteras inte här: den motorn har en process som ska leva mellan
+    poleringarna, så App äger instansen och anropar den direkt."""
     if cfg["polish_backend"] == "ollama":
         return polish_ollama(cfg, text, style, lang)
     return polish_http(cfg, text, style, lang)
@@ -114,12 +120,16 @@ def remote_label(cfg: dict) -> str:
     """Kort namn på tjänsten för statustexter i Inställningar och overlayn."""
     if cfg["polish_backend"] == "ollama":
         return "Ollama"
+    if cfg["polish_backend"] == "codex":
+        return "Codex"
     return "molntjänsten"
 
 
 def remote_model(cfg: dict) -> str:
     if cfg["polish_backend"] == "ollama":
         return cfg["polish_ollama_model"]
+    if cfg["polish_backend"] == "codex":
+        return cfg.get("polish_codex_model", "")
     return cfg["polish_http_model"]
 
 
@@ -200,11 +210,10 @@ def _strip_thinking(text: str) -> str:
 
 # -- http-backend: valfri OpenAI-kompatibel endpoint ---------------------------
 #
-# Tänkt för maskiner som inte kan köra en lokal poleringsmodell alls. Viska
-# talar bara OpenAI-formatets /chat/completions och vet ingenting om vad som
-# står bakom: en riktig API-nyckel, eller shimmen i tools/polish_server.py som
-# håller en Codex-process varm och kör prenumerationen. Byts tjänsten ut rörs
-# aldrig appen.
+# För en färdig endpoint: en företagsgateway, en egen server, en tjänst med
+# API-nyckel. Viska talar bara OpenAI-formatets /chat/completions och vet
+# ingenting om vad som står bakom. Behöver du bara komma igång utan GPU är
+# codex-backenden enklare — den kräver ingen adress alls.
 #
 # Ingen text lämnar datorn förrän den här backenden uttryckligen väljs.
 

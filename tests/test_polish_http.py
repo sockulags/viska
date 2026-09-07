@@ -1,17 +1,12 @@
 """http-backenden mot en påhittad server i samma process."""
 
-import importlib.util
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
-from viska import llm
-
-SHIM_PATH = Path(__file__).resolve().parents[1] / "tools" / "polish_server.py"
-
+from viska import codex, llm
 
 class _Stub(BaseHTTPRequestHandler):
     """Svarar som poleringstjänsten. `mode` styrs per test."""
@@ -153,84 +148,6 @@ def test_etikett_och_modell_foljer_backend():
     assert llm.remote_label(c) == "Ollama"
 
 
-# -- Shimmens rena logik ------------------------------------------------------
-
-
-@pytest.fixture(scope="module")
-def shim():
-    spec = importlib.util.spec_from_file_location("polish_server", SHIM_PATH)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def test_shim_delar_upp_meddelandena(shim):
-    task, text = shim._split_messages(
-        [
-            {"role": "system", "content": "skriv ett mejl"},
-            {"role": "user", "content": "hej ehm"},
-        ]
-    )
-    assert task == "skriv ett mejl"
-    assert text == "hej ehm"
-
-
-def test_shim_tar_sista_anvandarmeddelandet(shim):
-    _task, text = shim._split_messages(
-        [
-            {"role": "user", "content": "gammalt"},
-            {"role": "assistant", "content": "svar"},
-            {"role": "user", "content": "nytt"},
-        ]
-    )
-    assert text == "nytt"
-
-
-def test_shim_tal_skrapmeddelanden(shim):
-    task, text = shim._split_messages(["skräp", {"role": "user", "content": None}, None])
-    assert (task, text) == ("", "")
-
-
-def test_shim_klassar_kvotstopp_som_429(shim):
-    status, _ = shim._classify(RuntimeError("You've hit your usage limit."))
-    assert status == 429
-
-
-def test_shim_klassar_ovrigt_som_502(shim):
-    status, message = shim._classify(RuntimeError("nätverket dog"))
-    assert status == 502
-    assert message == "nätverket dog"
-
-
-class _FakeStatus:
-    """Som SDK:ns TurnStatus: en enum vars strängform inte är värdet."""
-
-    def __init__(self, value):
-        self.value = value
-
-    def __str__(self):
-        return f"TurnStatus.{self.value}"
-
-
-class _FakeResult:
-    def __init__(self, status, error=""):
-        self.status = status
-        self.error = error
-
-
-def test_shim_laser_status_ur_enumen(shim):
-    assert shim._turn_status(_FakeResult(_FakeStatus("completed"))) == "completed"
-    assert shim._turn_status(_FakeResult(_FakeStatus("failed"))) == "failed"
-
-
-def test_shim_tar_ocksa_strangstatus(shim):
-    assert shim._turn_status(_FakeResult("completed")) == "completed"
-
-
-def test_shim_saknad_status_raknas_som_klar(shim):
-    assert shim._turn_status(_FakeResult(None)) == "completed"
-
-
 # -- Vem som får skriva in text för en diktering -------------------------------
 
 
@@ -273,3 +190,81 @@ def test_avbrott_efter_inskrivning_andrar_inte_vinnaren():
     guard.cancel()
     assert guard.winner == "polerad"
     assert guard.cancelled is False
+
+
+# -- Codex-motorn: det som går att prova utan att anropa modellen -------------
+
+
+class _FakeStatus:
+    """Som SDK:ns TurnStatus: en enum vars strängform inte är värdet."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __str__(self):
+        return f"TurnStatus.{self.value}"
+
+
+class _FakeResult:
+    def __init__(self, status):
+        self.status = status
+
+
+def test_status_lases_ur_enumen():
+    assert codex.turn_status(_FakeResult(_FakeStatus("completed"))) == "completed"
+    assert codex.turn_status(_FakeResult(_FakeStatus("failed"))) == "failed"
+
+
+def test_status_tar_ocksa_strang_och_saknat_varde():
+    assert codex.turn_status(_FakeResult("completed")) == "completed"
+    assert codex.turn_status(_FakeResult(None)) == "completed"
+
+
+def test_kvotstopp_sags_rakt_ut_i_klartext():
+    text = codex.friendly_error(RuntimeError("You've hit your usage limit."))
+    assert "kvot" in text.lower()
+
+
+def test_ovriga_fel_lamnas_som_de_ar():
+    assert codex.friendly_error(RuntimeError("nätverket dog")) == "nätverket dog"
+
+
+def test_saknad_codex_forklaras(monkeypatch):
+    monkeypatch.setattr(codex.shutil, "which", lambda _n: None)
+    monkeypatch.setattr(codex, "_KNOWN_PATHS", ())
+    ok, text = codex.status()
+    assert ok is False
+    assert "hittades inte" in text
+
+
+def test_installerad_men_utloggad_forklaras(monkeypatch, tmp_path):
+    fake = tmp_path / "codex.exe"
+    fake.write_text("")
+    monkeypatch.setattr(codex.shutil, "which", lambda _n: str(fake))
+    monkeypatch.setattr(codex, "user_home", lambda: tmp_path / "tomt")
+    ok, text = codex.status()
+    assert ok is False
+    assert "inte inloggad" in text
+
+
+def test_eget_hem_far_config_och_kopierad_inloggning(monkeypatch, tmp_path):
+    real_home = tmp_path / "riktigt"
+    real_home.mkdir()
+    (real_home / "auth.json").write_text('{"token": "abc"}', encoding="utf-8")
+    monkeypatch.setattr(codex, "user_home", lambda: real_home)
+    monkeypatch.setattr(codex, "CODEX_HOME", tmp_path / "viska-hem")
+    codex.provision_home()
+    config_text = (codex.CODEX_HOME / "config.toml").read_text(encoding="utf-8")
+    # Inga verktyg, ingen sandlådeåtkomst, ingen webbsökning.
+    assert 'sandbox_mode = "read-only"' in config_text
+    assert 'web_search = "disabled"' in config_text
+    assert (codex.CODEX_HOME / "auth.json").read_text(encoding="utf-8") == '{"token": "abc"}'
+    # Ingenting av användarens egen uppsättning följer med.
+    assert list((codex.CODEX_HOME).iterdir()).__len__() == 2
+
+
+def test_utloggad_ger_tydligt_fel(monkeypatch, tmp_path):
+    monkeypatch.setattr(codex, "user_home", lambda: tmp_path / "tomt")
+    monkeypatch.setattr(codex, "CODEX_HOME", tmp_path / "hem")
+    with pytest.raises(RuntimeError, match="inloggad"):
+        codex.provision_home()

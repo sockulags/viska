@@ -4,7 +4,6 @@ import argparse
 import logging
 import os
 import queue
-import subprocess
 import sys
 import threading
 import time
@@ -15,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-from viska import __version__, autostart, commands, gpu, llm, metrics, update
+from viska import __version__, autostart, codex, commands, gpu, llm, metrics, update
 from viska.audio import SAMPLE_RATE, Recorder
 from viska.config import (
     CONFIG_DIR,
@@ -172,8 +171,8 @@ class App:
         # raderar och skriver om samma filer som den första.
         self._gpu_busy = threading.Event()
         self._llm_busy = threading.Event()
-        # Den lokala poleringstjänsten, när Viska startat den åt användaren.
-        self._polish_proc: subprocess.Popen | None = None
+        # Codex-motorn: en process som lever mellan poleringarna.
+        self._codex: codex.CodexPolisher | None = None
         # Tangentkonflikter (annat program äger tangenten) ska aldrig hindra
         # appen från att starta — men trayikonen finns inte förrän main()
         # kört klart make_tray(), så notiserna köas här och flushas därifrån.
@@ -816,53 +815,6 @@ class App:
             live=live,
         )
 
-    # -- Den lokala poleringstjänsten ----------------------------------------------
-    # Ett valfritt kommando (polish_http_command) som Viska får starta och
-    # stoppa, så att en lokal poleringsserver inte behöver dras igång för hand
-    # vid varje omstart.
-
-    def _service_running(self) -> bool:
-        return self._polish_proc is not None and self._polish_proc.poll() is None
-
-    def _start_service(self, command: str) -> str | None:
-        """Returnerar en felsträng, eller None när tjänsten startade."""
-        if not command:
-            return "Fyll i ett startkommando först."
-        if self._service_running():
-            return None
-        try:
-            # Strängen skickas som den är till CreateProcess (Windows tar
-            # emot en kommandorad, inte en argumentlista) och startas utan
-            # konsolfönster — annars poppar en svart ruta upp vid varje start.
-            self._polish_proc = subprocess.Popen(
-                command,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-        except Exception as e:  # noqa: BLE001
-            log.exception("Kunde inte starta poleringstjänsten")
-            return f"Kunde inte starta tjänsten: {e}"
-        log.info("Poleringstjänsten startad (pid %s)", self._polish_proc.pid)
-        return None
-
-    def _stop_service(self) -> None:
-        proc, self._polish_proc = self._polish_proc, None
-        if proc is None or proc.poll() is not None:
-            return
-        # taskkill /T tar med barnen. Servern startar i sin tur en egen
-        # app-server-process, och en ensam terminate() hade lämnat den kvar
-        # (det är precis så föräldralösa app-servrar samlas på hög).
-        try:
-            subprocess.run(
-                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                capture_output=True,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                timeout=10,
-            )
-        except Exception:
-            log.exception("taskkill misslyckades – försöker terminate()")
-            proc.terminate()
-        log.info("Poleringstjänsten stoppad")
-
     # -- Rätta senaste dikteringen (bygger ersättningsregler) -----------------------
 
     def request_correction(self) -> None:
@@ -1004,14 +956,12 @@ class App:
 
         def work():
             try:
-                if llm.is_remote(self.cfg):
-                    result["text"] = llm.polish_remote(self.cfg, text, style, lang)
-                else:
-                    polisher = self._get_polisher()
-                    polisher.ensure_loaded()
-                    result["text"] = polisher.polish(text, style, lang)
-            except Exception:
-                log.exception("Flow-poleringen misslyckades – skriver in råtext")
+                result["text"] = self._polish_with(self.cfg, text, style, lang)
+            except Exception as e:  # noqa: BLE001
+                log.warning(
+                    "Flow-poleringen misslyckades (%s) – skriver in råtext",
+                    codex.friendly_error(e),
+                )
             finally:
                 done.set()
 
@@ -1046,6 +996,33 @@ class App:
         text_out = result.get("text")
         return text_out, ("polerad" if text_out else "fel")
 
+    def _polish_with(
+        self, cfg: dict, text: str, style: str, lang: str = "sv"
+    ) -> str:
+        """All polering går genom den här: Codex, annan fjärrtjänst eller den
+        inbyggda modellen. cfg skickas med så att Inställningarnas testknapp
+        kan prova ett osparat val utan att starta en egen motor."""
+        backend = cfg["polish_backend"]
+        if backend == "codex":
+            return self._get_codex().polish(
+                text,
+                style,
+                lang,
+                model=cfg.get("polish_codex_model"),
+                effort=cfg.get("polish_codex_effort"),
+            )
+        if llm.is_remote(cfg):
+            return llm.polish_remote(cfg, text, style, lang)
+        polisher = self._get_polisher()
+        polisher.ensure_loaded()
+        return polisher.polish(text, style, lang)
+
+    def _get_codex(self) -> codex.CodexPolisher:
+        with self._polisher_lock:
+            if self._codex is None:
+                self._codex = codex.CodexPolisher(self.cfg)
+            return self._codex
+
     def _get_polisher(self) -> llm.Polisher:
         with self._polisher_lock:
             if self._polisher is None:
@@ -1056,14 +1033,21 @@ class App:
         """Börjar ladda in poleringsmodellen i bakgrunden när en flow-session
         startar, så att den är varm när dikteringen stoppas. Idempotent –
         ensure_loaded returnerar direkt om modellen redan är laddad."""
-        if llm.is_remote(self.cfg) or not llm.installed(self.cfg):
+        backend = self.cfg["polish_backend"]
+        if backend != "codex" and (llm.is_remote(self.cfg) or not llm.installed(self.cfg)):
             return
 
         def work():
             try:
-                self._get_polisher().ensure_loaded()
+                # Codex startar en process (~0,3 s) och de andra laddar en
+                # modell i VRAM — båda är värda att ha gjort innan dikteringen
+                # stoppas. Fjärrtjänster har inget att värma.
+                if backend == "codex":
+                    self._get_codex().ensure_loaded()
+                else:
+                    self._get_polisher().ensure_loaded()
             except Exception:
-                log.exception("Kunde inte förladda flow-poleringsmodellen")
+                log.exception("Kunde inte förbereda poleringen")
 
         threading.Thread(
             target=work, daemon=True, name="viska-flow-warmup"
@@ -1115,11 +1099,10 @@ class App:
             gpu_panel=self._gpu_panel(),
             polish_panel=self._polish_panel(llm.installed_local(self.cfg)),
             polish_ready=polish_ready,
-            service={
-                "running": self._service_running,
-                "start": self._start_service,
-                "stop": self._stop_service,
-            },
+            # Testknappen använder appens egen poleringsväg — då provas exakt
+            # det som kommer att köras, och Codex-processen som redan är varm
+            # återanvänds i stället för att en andra startas.
+            polish_fn=self._polish_with,
         )
 
     def _polish_panel(self, polish_ready: bool) -> dict:
@@ -1367,6 +1350,10 @@ class App:
                 self._on_update_available,
                 token=self.cfg.get("github_token", ""),
             )
+        if changes["polish_backend"] != old["polish_backend"] and self._codex:
+            # Bytt bort från Codex: låt inte processen ligga kvar och ta minne.
+            threading.Thread(target=self._codex.close, daemon=True).start()
+            self._codex = None
         self.sounds.enabled = bool(changes["sounds"])
         for t in self.transcribers.values():
             t.initial_prompt = changes["initial_prompt"]
@@ -1557,16 +1544,13 @@ class App:
             try:
                 if llm.is_remote(self.cfg):
                     self.overlay.show(
-                        f"Polerar via {llm.remote_label(self.cfg)}…", BLUE
+                        f"Polerar via {llm.remote_label(self.cfg)}", BLUE
                     )
-                    result = llm.polish_remote(self.cfg, text, style, self.language)
+                elif self._polisher is None:
+                    self.overlay.show("Laddar poleringsmodellen…", GRAY)
                 else:
-                    if self._polisher is None:
-                        self.overlay.show("Laddar poleringsmodellen…", GRAY)
-                    polisher = self._get_polisher()
-                    polisher.ensure_loaded()
-                    self.overlay.show("Polerar…", BLUE)
-                    result = polisher.polish(text, style, self.language)
+                    self.overlay.show("Polerar", BLUE)
+                result = self._polish_with(self.cfg, text, style, self.language)
             except Exception:
                 log.exception("Poleringen misslyckades")
                 restore_original_clipboard()
@@ -1603,7 +1587,8 @@ class App:
         if self.icon is not None:
             self.icon.stop()
         self._stop_keys()
-        self._stop_service()
+        if self._codex is not None:
+            self._codex.close()
         self.recorder.close()
         self._quit.set()
 

@@ -36,7 +36,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from viska import autostart, focus, llm, metrics, ui
+from viska import autostart, codex, focus, llm, metrics, ui
 from viska.config import CONFIG_PATH, LOG_PATH
 from viska.hotkey import HotkeyError, is_mouse, parse_hotkey
 
@@ -75,9 +75,11 @@ _MOUSE_BUTTONS = {
 # fungerar alls.
 _ENGINE_CHOICES = {
     "Inbyggd modell (kräver GPU)": "builtin",
+    "Codex (använder din inloggning)": "codex",
     "Ollama på den här datorn": "ollama",
     "Egen tjänst (moln eller lokal server)": "http",
 }
+_CODEX_EFFORT = ("low", "medium", "high")
 
 # Poleringsväljarnas specialval (utöver mallnamnen i biblioteket).
 _GLOBAL_STANDARD = "Ärv global standard"
@@ -217,18 +219,21 @@ class SettingsWindow:
         gpu_panel: dict | None = None,
         polish_panel: dict | None = None,
         polish_ready: bool = False,
-        service: dict | None = None,
+        polish_fn=None,
     ):
         """on_save(ändringar: dict) -> None | str (fel visas, fönstret kvar).
         Panelerna kommer från App._gpu_panel()/_polish_panel().
         polish_ready: True när poleringen är nedladdad/nåbar.
-        service: {"running": () -> bool, "start": (cmd) -> felsträng|None,
-        "stop": ()} för den lokala poleringstjänsten, eller None."""
+        polish_fn(cfg, text, style) -> text är appens egen poleringsväg,
+        som testknappen använder."""
         ui.refresh_theme()
         self._on_save = on_save
         self._polish_ready = polish_ready
         self._cfg = cfg
-        self._service = service
+        # polish_fn(cfg, text, style) -> text. Appens egen poleringsväg, så
+        # att testknappen provar exakt det som kommer att köras och kan
+        # återanvända en redan varm motor.
+        self._polish_fn = polish_fn
         self._orig_model = cfg["model"]
         # Tål handredigerad config: hoppa över trasiga profilposter.
         self._profiles = {
@@ -567,6 +572,32 @@ class SettingsWindow:
             _ActionPanel(block, self.win, polish_panel)
 
         block = tk.Frame(parent, bg=pal["window"])
+        self._engine_blocks["codex"] = block
+        self._codex_model = self._var(
+            tk.StringVar, value=cfg.get("polish_codex_model", "gpt-5.6-luna")
+        )
+        holder = self._row(block, "Modell", hint="Måste finnas i din Codex-katalog")
+        ttk.Entry(holder, textvariable=self._codex_model, width=_FIELD_W).pack()
+        self._codex_effort = self._var(
+            tk.StringVar, value=cfg.get("polish_codex_effort", "low")
+        )
+        holder = self._row(
+            block, "Tankenivå", hint="low är snabbast och räcker för omskrivning"
+        )
+        ttk.Combobox(
+            holder, textvariable=self._codex_effort, values=list(_CODEX_EFFORT),
+            state="readonly", width=_FIELD_W - 2,
+        ).pack()
+        ui.status_card(
+            block,
+            "warn",
+            "Texten lämnar datorn",
+            "Omskrivningen görs av OpenAI via din Codex-inloggning, och räknas "
+            "mot dess kvot. Allt annat i Viska stannar lokalt.",
+        ).pack(fill="x", pady=(8, 2))
+        self._build_remote_tools(block, "codex")
+
+        block = tk.Frame(parent, bg=pal["window"])
         self._engine_blocks["ollama"] = block
         self._ollama_model = self._var(tk.StringVar, value=cfg["polish_ollama_model"])
         holder = self._row(block, "Modell i Ollama")
@@ -591,14 +622,6 @@ class SettingsWindow:
         ttk.Entry(
             holder, textvariable=self._http_token, width=_FIELD_W, show="•"
         ).pack()
-        self._http_command = self._var(
-            tk.StringVar, value=str(cfg.get("polish_http_command") or "")
-        )
-        holder = self._row(
-            block, "Startkommando", hint="Lokal server som Viska får starta"
-        )
-        ttk.Entry(holder, textvariable=self._http_command, width=_FIELD_W).pack()
-        self._build_service_row(block)
         ui.status_card(
             block,
             "warn",
@@ -640,12 +663,8 @@ class SettingsWindow:
             hint="Hela dikteringen poleras innan den skrivs in",
         )
         ttk.Checkbutton(holder, variable=self._flow).pack()
-        if not polish_ready:
-            self._hint(
-                parent,
-                "Poleringen är inte tillgänglig ännu – tills den är det skrivs "
-                "dikteringen in som vanligt.",
-            )
+        # Ingen extra "poleringen är inte redo"-text här: motorblocket ovanför
+        # vet sanningen och uppdaterar sig själv. Två källor sa emot varandra.
 
         # -- Mallbibliotek -----------------------------------------------------
         ui.section(parent, "Stilar")
@@ -1157,7 +1176,7 @@ class SettingsWindow:
                 block.pack(fill="x", pady=(2, 0))
             else:
                 block.pack_forget()
-        if chosen in ("ollama", "http"):
+        if chosen in ("ollama", "http", "codex"):
             self._probe_remote(chosen)
 
     def _build_remote_tools(self, parent, backend: str) -> None:
@@ -1175,48 +1194,6 @@ class SettingsWindow:
         ).pack(anchor="w", pady=(4, 0))
         self._remote_widgets[backend] = {"status": status}
 
-    def _build_service_row(self, parent) -> None:
-        pal = self._pal
-        row = tk.Frame(parent, bg=pal["window"])
-        row.pack(fill="x", pady=(6, 0))
-        self._service_btn = ttk.Button(
-            row, text="Starta tjänsten", command=self._toggle_service
-        )
-        self._service_btn.pack(side="left")
-        self._service_status = tk.Label(
-            row, text="", bg=pal["window"], fg=pal["muted"],
-            font=("Segoe UI", 8), anchor="w",
-        )
-        self._service_status.pack(side="left", padx=(8, 0))
-        self._refresh_service_row()
-
-    def _refresh_service_row(self) -> None:
-        if self._service is None:
-            self._service_btn.config(state="disabled")
-            self._service_status.config(text="(inte tillgängligt)")
-            return
-        running = bool(self._service["running"]())
-        self._service_btn.config(
-            text="Stoppa tjänsten" if running else "Starta tjänsten",
-            state="normal" if self._http_command.get().strip() else "disabled",
-        )
-        self._service_status.config(text="kör" if running else "stoppad")
-
-    def _toggle_service(self) -> None:
-        if self._service is None:
-            return
-        if self._service["running"]():
-            self._service["stop"]()
-        else:
-            error = self._service["start"](self._http_command.get().strip())
-            if error:
-                self._error.config(text=error)
-                return
-            self._error.config(text="")
-        self._refresh_service_row()
-        # Tjänsten behöver ett ögonblick på sig innan den svarar.
-        self.win.after(1200, lambda: self._probe_remote("http"))
-
     # -- Nåbarhet och testpolering i bakgrunden ------------------------------------
 
     def _engine_cfg(self) -> dict:
@@ -1225,6 +1202,8 @@ class SettingsWindow:
         return {
             **self._cfg,
             "polish_backend": _ENGINE_CHOICES.get(self._engine.get(), "builtin"),
+            "polish_codex_model": self._codex_model.get().strip(),
+            "polish_codex_effort": self._codex_effort.get(),
             "polish_ollama_model": self._ollama_model.get().strip(),
             "polish_ollama_url": self._ollama_url.get().strip(),
             "polish_http_url": self._http_url.get().strip(),
@@ -1236,10 +1215,15 @@ class SettingsWindow:
         widgets = self._remote_widgets.get(backend)
         if widgets is None:
             return
-        widgets["status"].config(text="Kontrollerar anslutningen…")
+        widgets["status"].config(text="Kontrollerar…")
         cfg = {**self._engine_cfg(), "polish_backend": backend}
 
         def work():
+            if backend == "codex":
+                # Codex vet själv varför den inte är redo (saknas, inte
+                # inloggad) — den förklaringen är mer värd än ett "svarar inte".
+                self._remote_queue.put((backend, "status", codex.status()[1]))
+                return
             try:
                 ok = llm.remote_reachable(cfg)
             except Exception:
@@ -1290,14 +1274,18 @@ class SettingsWindow:
         def work():
             t0 = time.perf_counter()
             try:
-                if llm.is_remote(cfg):
+                if self._polish_fn is not None:
+                    out = self._polish_fn(cfg, text, style)
+                elif llm.is_remote(cfg):
                     out = llm.polish_remote(cfg, text, style, "sv")
                 else:
                     out = llm.Polisher(cfg).polish(text, style, "sv")
                 seconds = f"{time.perf_counter() - t0:.1f}".replace(".", ",")
                 self._remote_queue.put(("test", "done", (token, out, seconds)))
             except Exception as e:  # noqa: BLE001
-                self._remote_queue.put(("test", "error", (token, str(e), "")))
+                self._remote_queue.put(
+                    ("test", "error", (token, codex.friendly_error(e), ""))
+                )
 
         threading.Thread(target=work, daemon=True, name="viska-polishtest").start()
 
@@ -1701,6 +1689,11 @@ class SettingsWindow:
             "append_space": self._append.get(),
             "mic_mode": _MIC_CHOICES[self._mic_mode.get()],
             "polish_backend": _ENGINE_CHOICES.get(self._engine.get(), "builtin"),
+            "polish_codex_model": self._codex_model.get().strip() or "gpt-5.6-luna",
+            "polish_codex_effort": (
+                self._codex_effort.get() if self._codex_effort.get() in _CODEX_EFFORT
+                else "low"
+            ),
             "polish_ollama_model": self._ollama_model.get().strip() or "qwen3.5:9b",
             "polish_ollama_url": (
                 self._ollama_url.get().strip() or "http://localhost:11434"
@@ -1711,7 +1704,6 @@ class SettingsWindow:
             ),
             "polish_http_model": self._http_model.get().strip() or "gpt-5.6-luna",
             "polish_http_token": self._http_token.get().strip(),
-            "polish_http_command": self._http_command.get().strip(),
             "polish_double_tap": self._double_tap.get(),
             "polish_test_text": self._test_sample.get("1.0", "end").strip(),
             "replacements": dict(self._replacements),

@@ -166,37 +166,24 @@ DEFAULTS = {
     # "builtin" = inbyggd motor (llama.cpp, laddas ner via Inställningar).
     # "ollama" = återanvänd en körande Ollama och dess modeller — inget
     # extra laddas ner.
-    # "http" = valfri OpenAI-kompatibel endpoint. Tänkt för datorer som inte
-    # kan köra en poleringsmodell lokalt: peka den på en riktig API-tjänst,
-    # eller på shimmen i tools/polish_server.py som håller en Codex-process
-    # varm. OBS: med den här backenden lämnar den polerade texten datorn.
+    # "codex" = använd Codex som redan är installerad och inloggad på datorn.
+    # Viska startar och sköter processen själv; inget behöver kopplas ihop.
+    # "http" = valfri OpenAI-kompatibel endpoint, för egna tjänster.
+    # OBS: både "codex" och "http" skickar den polerade texten från datorn.
     "polish_backend": "builtin",
     "polish_ollama_model": "qwen3.5:9b",
     "polish_ollama_url": "http://localhost:11434",
+    # Codex-backenden. Modellen måste finnas i din Codex-katalog.
+    "polish_codex_model": "gpt-5.6-luna",
+    # low är lägsta nivån modellerna stöder; none och minimal avvisas.
+    "polish_codex_effort": "low",
     # http-backenden. Adressen är hela chat/completions-vägen; /health på
     # samma värd används för nåbarhetskollen.
     "polish_http_url": "http://127.0.0.1:8756/v1/chat/completions",
     "polish_http_model": "gpt-5.6-luna",
-    # Skickas som "Authorization: Bearer …" när den är ifylld. Shimmen kan
-    # kräva den så att inget annat program på datorn kan använda tjänsten.
+    # Skickas som "Authorization: Bearer …" när den är ifylld.
     "polish_http_token": "",
     "polish_http_timeout_s": 60,
-    # Kommando som startar den lokala poleringstjänsten. Är det ifyllt kan
-    # Viska starta och stoppa den från Inställningar → Polering i stället för
-    # att den måste dras igång för hand vid varje omstart. Tom = av.
-    # T.ex.: uv run --directory C:\\Users\\du\\Code\\viska tools/polish_server.py
-    "polish_http_command": "",
-    # Meningen som "Testa polering" skickar. Redigerbar i Inställningar så att
-    # man kan prova sin egen typiska diktering.
-    "polish_test_text": (
-        "hej ehm jag ville bara höra om vi kan flytta mötet på torsdag till "
-        "fredag i stället för jag har en grej som krockar"
-    ),
-    # Kommando som startar den lokala poleringstjänsten. Är det ifyllt kan
-    # Viska starta och stoppa den från Inställningar → Polering i stället för
-    # att den måste dras igång för hand vid varje omstart. Tom = av.
-    # T.ex.: uv run --directory C:\\Users\\du\\Code\\viska tools/polish_server.py
-    "polish_http_command": "",
     # Meningen som "Testa polering" skickar. Redigerbar i Inställningar så att
     # man kan prova sin egen typiska diktering.
     "polish_test_text": (
