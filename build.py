@@ -70,6 +70,10 @@ def main() -> None:
             # sv-ttk har temat som tcl-filer
             "--collect-data", "faster_whisper",
             "--collect-data", "sv_ttk",
+            # openai_codex importeras först när Codex-motorn används, så
+            # beroendeanalysen hittar den aldrig på egen hand. Utan det här
+            # blev "Codex" ett val som kraschade på ImportError i exe:n.
+            "--collect-submodules", "openai_codex",
             *[arg for pkg in EXCLUDED_PACKAGES for arg in ("--exclude-module", pkg)],
             str(ROOT / "run_viska.py"),
         ],

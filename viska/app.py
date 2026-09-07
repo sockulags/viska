@@ -1720,6 +1720,14 @@ def main() -> None:
     parser.add_argument(
         "--check", action="store_true", help="ladda modellen och rapportera status"
     )
+    parser.add_argument(
+        "--check-polish",
+        nargs="?",
+        const="",
+        metavar="MOTOR",
+        help="rapportera poleringsmotorns status och prova en omskrivning; "
+        "ange builtin/codex/ollama/http för att prova en annan än den valda",
+    )
     parser.add_argument("--install-autostart", action="store_true")
     parser.add_argument("--uninstall-autostart", action="store_true")
     parser.add_argument(
@@ -1763,6 +1771,43 @@ def main() -> None:
             if autostart.uninstall()
             else "Ingen autostart-genväg hittades."
         )
+        return
+    if args.check_polish is not None:
+        if args.check_polish:
+            cfg = {**cfg, "polish_backend": args.check_polish}
+        backend = cfg["polish_backend"]
+        print(f"Motor:   {backend}")
+        if backend == "codex":
+            ok, text = codex.status()
+            print(f"Codex:   {text}")
+            print(f"Modell:  {cfg['polish_codex_model']} (nivå {cfg['polish_codex_effort']})")
+            if not ok:
+                sys.exit(1)
+        elif llm.is_remote(cfg):
+            print(f"Tjänst:  {llm.remote_label(cfg)} – {llm.remote_model(cfg)}")
+            print(f"Svarar:  {'ja' if llm.remote_reachable(cfg) else 'nej'}")
+        else:
+            print(f"Nedladdad: {'ja' if llm.installed_local(cfg) else 'nej'}")
+        sample = "hej ehm kan vi flytta mötet på torsdag till fredag i stället"
+        print(f"Provar:  {sample}")
+        import time as _time
+
+        started = _time.perf_counter()
+        try:
+            app_stub = App.__new__(App)  # bara poleringsvägen behövs
+            app_stub.cfg = cfg
+            app_stub._codex = None
+            app_stub._polisher = None
+            app_stub._polisher_lock = threading.Lock()
+            out = app_stub._polish_with(cfg, sample, llm.resolve_polish_prompt(cfg))
+            print(f"Svar:    {out}")
+            print(f"Tid:     {(_time.perf_counter() - started):.1f} s")
+        except Exception as e:  # noqa: BLE001
+            print(f"Fel:     {codex.friendly_error(e)}")
+            sys.exit(1)
+        finally:
+            if getattr(app_stub, "_codex", None) is not None:
+                app_stub._codex.close()
         return
     if args.check or args.transcribe:
         lang = args.language or cfg["language"]
