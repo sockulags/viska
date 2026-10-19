@@ -72,3 +72,41 @@ def test_registret_gar_att_lasa():
     for ep in mics.capture_endpoints():
         assert ep.device
         assert ep.enumerator
+
+
+# -- Pågående samtal --------------------------------------------------------------
+
+TEAMS = r"microphone\MSTeams_8wekyb3d8bbwe"
+CHROME = r"microphone\NonPackaged\C:#Program Files#Google#Chrome#Application#chrome.exe"
+ZOOM = r"microphone\NonPackaged\C:#Users#a#AppData#Roaming#Zoom#bin#Zoom.exe"
+VISKA = r"microphone\NonPackaged\C:#Users#a#Viska#Viska.exe"
+OBS = r"microphone\NonPackaged\C:#Program Files#obs-studio#bin#64bit#obs64.exe"
+
+
+def test_samtalsprogram_kanns_igen():
+    for key in (TEAMS, CHROME, ZOOM):
+        assert mics.in_call([key]), key
+
+
+def test_andra_program_med_mikrofonen_ar_inget_samtal():
+    assert not mics.in_call([VISKA, OBS])
+    assert not mics.in_call([])
+
+
+def test_headset_anvands_under_ett_samtal():
+    choice = mics.choose(
+        [HEADSET, BUILT_IN], 3, ENDPOINTS, call_active=True
+    )
+    assert choice.device == 3
+    assert choice.in_call
+    assert "redan i samtalsläge" in choice.describe()
+
+
+def test_samtal_paverkar_inte_en_vanlig_mikrofon():
+    choice = mics.choose([HEADSET, BUILT_IN], 8, ENDPOINTS, call_active=True)
+    assert choice.device == 8
+    assert not choice.in_call
+
+
+def test_registret_over_mikrofonanvandare_gar_att_lasa():
+    assert isinstance(mics.mic_users(), list)

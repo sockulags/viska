@@ -26,6 +26,19 @@ _PROP_DEVICE_NAME = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6"
 # Uppräknaren ("BTHHFENUM", "USB", "HDAUDIO").
 _PROP_ENUMERATOR = "{a45c254e-df1c-4efd-8020-67d146a850e0},24"
 
+# Windows bokför per program vem som använder mikrofonen, samma uppgift som
+# ligger bakom mikrofonikonen i aktivitetsfältet. Referat läser den för att
+# upptäcka samtal; samma regler används här.
+_CONSENT_KEY = (
+    r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager"
+    r"\ConsentStore\microphone"
+)
+_CALL_APPS = re.compile(
+    r"\\msteams_|#(ms-)?teams\.exe$|#zoom\.exe$"
+    r"|#(chrome|msedge|firefox|brave|opera|vivaldi)\.exe$",
+    re.IGNORECASE,
+)
+
 # Ingångar som inte är mikrofoner: linjeingång och "det datorn spelar".
 _NOT_A_MIC = re.compile(r"stereo ?mix|what u hear|\blin(e|je)\b", re.IGNORECASE)
 
@@ -49,6 +62,8 @@ class Choice:
     bluetooth: bool
     # Headsetet som Windows hade som standard men som Viska gick förbi.
     avoided: str | None = None
+    # Headsetet används för att ett samtal redan har det i samtalsläge.
+    in_call: bool = False
 
     def describe(self) -> str:
         if not self.name:
@@ -57,6 +72,11 @@ class Choice:
             return (
                 f"Lyssnar med {self.name}. {self.avoided} används inte, "
                 "eftersom headsetet då byter till samtalsläge."
+            )
+        if self.in_call:
+            return (
+                f"Lyssnar med {self.name}. Headsetet är redan i samtalsläge "
+                "för ditt samtal, så inget ändras."
             )
         if self.bluetooth:
             return (
@@ -96,6 +116,50 @@ def capture_endpoints() -> list[Endpoint]:
     return result
 
 
+def mic_users() -> list[str]:
+    """Registernycklarna för de program som använder mikrofonen just nu:
+    en senaste användning som har börjat men inte slutat."""
+    try:
+        import winreg
+    except ImportError:
+        return []
+    users = []
+
+    def visit(key, path: str) -> None:
+        try:
+            start = winreg.QueryValueEx(key, "LastUsedTimeStart")[0]
+            stop = winreg.QueryValueEx(key, "LastUsedTimeStop")[0]
+            if start and stop == 0:
+                users.append(path)
+        except OSError:
+            pass
+        index = 0
+        while True:
+            try:
+                name = winreg.EnumKey(key, index)
+            except OSError:
+                return
+            index += 1
+            try:
+                with winreg.OpenKey(key, name) as child:
+                    visit(child, f"{path}\\{name}")
+            except OSError:
+                continue
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _CONSENT_KEY) as root:
+            visit(root, "microphone")
+    except OSError:
+        return []
+    return users
+
+
+def in_call(users: list[str] | None = None) -> bool:
+    """Har Teams, Zoom eller en webbläsare mikrofonen öppen?"""
+    users = mic_users() if users is None else users
+    return any(_CALL_APPS.search(user) for user in users)
+
+
 def _hardware(name: str) -> str:
     """'Headset (Jabra Evolve3 85 Hands-Free)' -> 'Jabra Evolve3 85 Hands-Free'."""
     match = re.search(r"\(([^()]*)\)\s*$", name)
@@ -123,6 +187,7 @@ def choose(
     default: int | None,
     endpoints: list[Endpoint],
     avoid_bluetooth: bool = True,
+    call_active: bool = False,
 ) -> Choice | None:
     """Ren beslutslogik.
 
@@ -138,6 +203,10 @@ def choose(
         return Choice(default, default_name, bluetooth=False)
     if not avoid_bluetooth:
         return Choice(default, default_name, bluetooth=True)
+    if call_active:
+        # Ett samtal har redan headsetet i samtalsläge; att lyssna med det
+        # ändrar ingenting och ger samma mikrofon som samtalet.
+        return Choice(default, default_name, bluetooth=True, in_call=True)
 
     candidates = [
         (index, name)
@@ -186,7 +255,10 @@ def resolve(input_device, avoid_bluetooth: bool = True) -> Choice:
         log.exception("Kunde inte läsa WASAPI-enheterna")
         inputs, default = [], None
 
-    choice = choose(inputs, default, capture_endpoints(), avoid_bluetooth)
+    choice = choose(
+        inputs, default, capture_endpoints(), avoid_bluetooth,
+        call_active=avoid_bluetooth and in_call(),
+    )
     if choice is not None:
         return choice
     try:
