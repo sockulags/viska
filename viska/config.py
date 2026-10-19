@@ -222,6 +222,10 @@ DEFAULTS = {
     # null = systemets standardmikrofon. Annars namn eller index från
     # `viska --list-devices`.
     "input_device": None,
+    # Med input_device = null: är Windows standardmikrofon ett Bluetooth-
+    # headset används datorns egen mikrofon i stället. Headsetet byter annars
+    # till samtalsläge (mono, sämre ljud) så länge dess mikrofon är öppen.
+    "mic_avoid_bluetooth": True,
     # När mikrofonströmmen är öppen. Windows visar mikrofonikonen i
     # aktivitetsfältet så länge den är det.
     #   "on_demand" – öppnas vid dikteringen och stängs mic_idle_close_s
