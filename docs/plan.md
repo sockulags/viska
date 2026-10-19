@@ -17,7 +17,8 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   — valet görs vid varje öppning och öppnar via WASAPI. Inte verifierat med ett anslutet
   headset. Ett headset via USB-dongel (din Jabra Link 390) syns som USB för Windows och
   kan inte kännas igen här.
-- [ ] 0.3b Kortare stängning av mikrofonen och WASAPI
+- [x] 0.3b Kortare stängning av mikrofonen och WASAPI — 2 s i stället för 20, ett headset
+  stängs direkt, och startljudet väntar på riktigt ljud när headsetets mikrofon öppnas.
 - [ ] 0.3c Headsetet används fritt när det redan är i ett samtal
 - [ ] 0.4 Grafikminne vid modellbyte
 - [ ] 0.5 Klippbordet återställer mer än text

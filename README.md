@@ -134,8 +134,12 @@ flowchart LR
     H -. insertion mode .-> E
 ```
 
-Viska keeps the microphone open by default to avoid clipping the first syllable, but only
-retains a rolling buffer of roughly half a second in memory. No recording is saved. Finished
+Viska opens the microphone when you press the hotkey and closes it two seconds after the
+last dictation, so a quick follow-up dictation starts without delay. While the stream is
+open, only a rolling buffer of a quarter of a second is kept in memory. No recording is
+saved. If the Windows default microphone is a Bluetooth headset, Viska listens with the
+computer's own microphone instead, because the headset switches to low-quality call mode
+while its microphone is in use. Finished
 text is inserted either through a protected clipboard flow or by typing Unicode characters
 one by one for applications that do not accept paste.
 
@@ -231,7 +235,8 @@ Useful defaults include:
 | `live` | `auto` | Enabled on GPU, disabled on CPU |
 | `inject_mode` | `paste` | Protected clipboard insertion or character-by-character typing |
 | `mic_mode` | `on_demand` | Microphone stream open only around dictation (`always`, `closed`) |
-| `mic_idle_close_s` | `20` | Seconds of silence before the stream is closed again |
+| `mic_idle_close_s` | `2` | Seconds after a dictation before the stream is closed again |
+| `mic_avoid_bluetooth` | `true` | Use the computer's microphone instead of a Bluetooth headset's |
 | `replacements` | `{}` | Heard phrase to written text, applied after transcription |
 | `history_persist` | `false` | Keep recent dictations in memory only |
 | `flow` | `false` | Polish full dictations before insertion |

@@ -1753,7 +1753,7 @@ class SettingsWindow:
             self._adv["hold_threshold_s"].get().replace(",", ".") or 0.35
         )
         changes["mic_idle_close_s"] = float(
-            self._adv["mic_idle_close_s"].get().replace(",", ".") or 20
+            self._adv["mic_idle_close_s"].get().replace(",", ".") or 2
         )
         changes["polish_hotkey"] = self._adv["polish_hotkey"].get().strip() or "f8"
         changes["polish_menu_hotkey"] = self._adv["polish_menu_hotkey"].get().strip()

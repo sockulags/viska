@@ -55,6 +55,9 @@ LANG_NAMES = {"sv": "svensk", "en": "engelsk"}
 # Flow-läget: tar poleringen längre tid än så här skrivs råtexten in i
 # stället. Diktering får aldrig blockeras av en trög eller hängande modell.
 FLOW_POLISH_TIMEOUT_S = 10.0
+# Hur länge startsignalen väntar på att ett Bluetooth-headset ska byta till
+# samtalsläge. Microsoft anger "flera sekunder" som värsta fall.
+HEADSET_CONNECT_TIMEOUT_S = 3.0
 
 # Poleringstangenten: två tryck inom det här fönstret öppnar tonvalsmenyn i
 # stället för att polera direkt. Ett enkeltryck fördröjs så länge (och bara så
@@ -117,6 +120,7 @@ class App:
             cfg["mic_mode"],
             cfg["preroll_s"],
             cfg["mic_idle_close_s"],
+            close_now=self._mic_is_bluetooth,
         )
         self.overlay = Overlay(root, level_source=lambda: self.recorder.level)
         self.tone_menu = ToneMenu(root)
@@ -144,6 +148,9 @@ class App:
         # Serialiserar start/stopp av en dikteringssession (hotkey-trådarna
         # och maxtidstimern) och fryser vilket språk sessionen hade.
         self._session_lock = threading.Lock()
+        # Räknas upp för varje diktering, så att en fördröjd startsignal kan
+        # se om den fortfarande gäller samma diktering.
+        self._session_seq = 0
         self._session_language = self.language
         self._session_transcriber: Transcriber | None = None
         self._session_prompt: str | None = None
@@ -554,7 +561,7 @@ class App:
                 )
                 return False
             try:
-                self.recorder.start()
+                fresh_stream = self.recorder.start()
             except Exception:
                 log.exception("Kunde inte starta inspelningen")
                 self.sounds.error()
@@ -604,9 +611,22 @@ class App:
             self._session_polish_prompt = llm.resolve_polish_prompt(
                 self.cfg, profile
             )
-            self.sounds.start()
+            self._session_seq += 1
             self._set_tray_recording(True)
-            self.overlay.show("Spelar in", RED, meter=True, timer=True)
+            if fresh_stream and self._mic_is_bluetooth():
+                # Headsetet byter till samtalsläge först nu och levererar
+                # tystnad tills det är klart. Startljudet väntar på riktigt
+                # ljud, så att ingen börjar prata in i tystnaden.
+                self.overlay.show("Ansluter headsetets mikrofon …", GRAY)
+                threading.Thread(
+                    target=self._announce_when_audio,
+                    args=(self._session_seq,),
+                    daemon=True,
+                    name="viska-headset",
+                ).start()
+            else:
+                self.sounds.start()
+                self.overlay.show("Spelar in", RED, meter=True, timer=True)
             if self._watchdog is not None:  # ska inte hända, men läck aldrig
                 self._watchdog.cancel()
             self._watchdog = threading.Timer(
@@ -626,6 +646,21 @@ class App:
             elif self._live_enabled(transcriber):
                 self._start_live_worker(transcriber, lang, preview_only=False)
             return True
+
+    def _announce_when_audio(self, seq: int) -> None:
+        heard = self.recorder.wait_for_audio(HEADSET_CONNECT_TIMEOUT_S)
+        with self._session_lock:
+            if seq != self._session_seq or not self.recorder.recording:
+                return  # dikteringen hann ta slut
+            if not heard:
+                log.warning(
+                    "Inget ljud från headsetet efter %.0f s", HEADSET_CONNECT_TIMEOUT_S
+                )
+            self.sounds.start()
+            self.overlay.show("Spelar in", RED, meter=True, timer=True)
+
+    def _mic_is_bluetooth(self) -> bool:
+        return self._mic_choice is not None and self._mic_choice.bluetooth
 
     def _choose_mic(self):
         """Anropas av Recorder varje gång strömmen öppnas."""
