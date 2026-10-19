@@ -26,7 +26,7 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
 - [x] 0.5 Klippbordet återställer mer än text — bilder, filer och formaterad text. Från
   Excel och Word kan bara en del av formaten hinna sparas (gräns 150 ms); texten sparas
   alltid först.
-- [ ] 0.7 Tester för mikrofon, liveläge, klippbord och tangentstyrning
+- [x] 0.7 Tester för mikrofon, liveläge, klippbord och tangentstyrning
 - [ ] 0.6 Mät utfyllnadsord — *väntar på dig: riktiga dikteringar*
 - [ ] Mät Bluetooth-bytet på ditt headset — *väntar på dig*
 

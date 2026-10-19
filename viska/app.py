@@ -563,7 +563,9 @@ class App:
                     "Viska: modellen laddas fortfarande…", GRAY, auto_hide_ms=1500
                 )
                 return False
-            if self._transcribing.is_set():
+            # Maxtidsstoppet släpper tangenten innan inspelningen hunnit
+            # tas; ett nytt tryck i det glappet får inte skriva över den.
+            if self._transcribing.is_set() or self.recorder.recording:
                 self.overlay.show(
                     "Viska: vänta – förra dikteringen skrivs ut…",
                     GRAY,
