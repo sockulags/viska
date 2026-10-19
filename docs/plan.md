@@ -19,7 +19,8 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   kan inte kännas igen här.
 - [x] 0.3b Kortare stängning av mikrofonen och WASAPI — 2 s i stället för 20, ett headset
   stängs direkt, och startljudet väntar på riktigt ljud när headsetets mikrofon öppnas.
-- [ ] 0.3c Headsetet används fritt när det redan är i ett samtal
+- [x] 0.3c Headsetet används fritt när det redan är i ett samtal — "samtal" betyder att
+  Teams, Zoom eller en webbläsare har mikrofonen öppen, samma regel som Referat använder.
 - [ ] 0.4 Grafikminne vid modellbyte
 - [ ] 0.5 Klippbordet återställer mer än text
 - [ ] 0.7 Tester för mikrofon, liveläge, klippbord och tangentstyrning
