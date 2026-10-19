@@ -79,10 +79,10 @@ def _read_text() -> str | None:
 
 @pytest.fixture
 def saved_clipboard():
-    before = _read_text()
+    before = inject._snapshot_clipboard()
     yield
     if before is not None:
-        inject._set_clipboard_text(before)
+        inject._restore_snapshot(before)
 
 
 def _start_reader():
@@ -121,3 +121,65 @@ def test_nytt_innehall_slapper_vantan(saved_clipboard):
     inject._set_clipboard_text("nytt")
     assert offer.read_by_target.wait(1)
     assert _read_text() == "nytt"
+
+
+# -- Ögonblicksbild av hela klippbordet ------------------------------------------
+
+
+def _set_formats(items):
+    assert inject._open_clipboard()
+    try:
+        win32clipboard.EmptyClipboard()
+        for fmt, data in items:
+            win32clipboard.SetClipboardData(fmt, data)
+    finally:
+        win32clipboard.CloseClipboard()
+
+
+def _formats_now() -> dict[int, bytes]:
+    snap = inject._snapshot_clipboard()
+    return dict(snap.items)
+
+
+def test_bild_och_eget_format_kommer_tillbaka(saved_clipboard):
+    custom = win32clipboard.RegisterClipboardFormat("Viska Testformat")
+    # En liten men giltig DIB: BITMAPINFOHEADER för 1×1 px, 32 bitar.
+    header = (40).to_bytes(4, "little") + (1).to_bytes(4, "little") * 2
+    header += (1).to_bytes(2, "little") + (32).to_bytes(2, "little")
+    header += bytes(24)
+    dib = header + bytes([0x10, 0x20, 0x30, 0x00])
+    _set_formats([(win32con.CF_DIB, dib), (custom, b"hemligt innehall")])
+
+    snap = inject._snapshot_clipboard()
+    assert snap.complete
+    inject._set_clipboard_text("dikterad text")
+    inject._restore_snapshot(snap)
+
+    now = _formats_now()
+    assert now[custom].startswith(b"hemligt innehall")
+    assert now[win32con.CF_DIB].startswith(dib)
+    assert _read_text() is None  # ingen dikterad text kvar
+
+
+def test_tomt_klippbord_blir_tomt_igen(saved_clipboard):
+    _set_formats([])
+    snap = inject._snapshot_clipboard()
+    assert snap.items == []
+    inject._set_clipboard_text("dikterad text")
+    inject._restore_snapshot(snap)
+    assert _read_text() is None
+
+
+def test_text_sparas_forst_nar_tiden_tar_slut(saved_clipboard, monkeypatch):
+    custom = win32clipboard.RegisterClipboardFormat("Viska Langsamt format")
+    _set_formats([(custom, b"stort"), (win32con.CF_UNICODETEXT, "viktig text")])
+    real_read = inject._read_format
+
+    def slow_read(fmt):
+        time.sleep(inject._SNAPSHOT_BUDGET_S + 0.05)
+        return real_read(fmt)
+
+    monkeypatch.setattr(inject, "_read_format", slow_read)
+    snap = inject._snapshot_clipboard()
+    assert not snap.complete
+    assert [fmt for fmt, _ in snap.items] == [win32con.CF_UNICODETEXT]
