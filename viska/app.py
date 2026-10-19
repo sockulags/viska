@@ -685,7 +685,6 @@ class App:
             watchdog, self._watchdog = self._watchdog, None
             if watchdog is not None:
                 watchdog.cancel()
-            self.sounds.stop()
             self._set_tray_recording(False)
             self._session_stopped_at = time.perf_counter()
             # Ljudet fryses FÖRE livearbetaren stoppas. Att vänta in arbetaren
@@ -696,6 +695,9 @@ class App:
             # frames räknas av mot det redan frysta ljudet.
             live, self._live = self._live, None
             audio = self.recorder.stop()
+            # Stoppljudet först när svansen är inspelad, annars kan det
+            # komma med i ljudet via högtalarna.
+            self.sounds.stop()
             self._transcribing.set()
             self.overlay.show("Transkriberar", BLUE)
             lang = self._session_language

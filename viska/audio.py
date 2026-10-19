@@ -31,7 +31,11 @@ import sounddevice as sd
 log = logging.getLogger(__name__)
 
 SAMPLE_RATE = 16000
-BLOCK = 1600  # 100 ms per callback-block
+BLOCK = 800  # 50 ms per callback-block
+# Hur länge efter tangentsläppet ljudet fortsätter att tas med. Det sista
+# ordet klingar ofta ut efter att fingret lämnat tangenten, och blocket som
+# fylls just då kommer först när det är fullt.
+TAIL_S = 0.12
 
 
 ALWAYS = "always"
@@ -47,10 +51,12 @@ class Recorder:
         mode: str = ON_DEMAND,
         preroll_s: float = 0.25,
         idle_close_s: float = 20.0,
+        tail_s: float = TAIL_S,
     ):
         self._device = input_device
         self._mode = mode if mode in MODES else ON_DEMAND
         self._idle_close_s = max(0.0, float(idle_close_s))
+        self._tail_s = max(0.0, float(tail_s))
         self._idle_timer: threading.Timer | None = None
         self._preroll_blocks = max(0, int(preroll_s * SAMPLE_RATE / BLOCK))
         self._ring = deque(maxlen=self._preroll_blocks + 2)
@@ -61,6 +67,9 @@ class Recorder:
         # under strömoperationer: stream.stop() väntar in callbacken, som
         # själv tar _lock.
         self._lock = threading.Lock()
+        # Väcks av callbacken för varje nytt block; stop() väntar på svansen.
+        self._block_arrived = threading.Condition(self._lock)
+        self._last_block_t = 0.0
         self._stream_lock = threading.Lock()
         self._stream = None
         self._last_frame_t = 0.0
@@ -101,6 +110,7 @@ class Recorder:
     def stop(self) -> np.ndarray:
         with self._stream_lock:
             with self._lock:
+                self._wait_for_tail()
                 chunks, self._chunks = self._chunks, None
                 self._ring.clear()  # spara inget ljud mellan dikteringar
             if self._mode == CLOSED:
@@ -167,7 +177,8 @@ class Recorder:
     # -- Internt --------------------------------------------------------------
 
     def _callback(self, indata, frames, time_info, status) -> None:
-        self._last_frame_t = time.monotonic()
+        now = time.monotonic()
+        self._last_frame_t = now
         # Nivå för overlayns mätare; läses från GUI-tråden utan lås
         # (float-skrivning är atomär, värdet är rent kosmetiskt).
         self.level = float(np.sqrt(np.mean(indata**2)))
@@ -176,6 +187,26 @@ class Recorder:
                 self._chunks.append(indata.copy())
             else:
                 self._ring.append(indata.copy())
+            self._last_block_t = now
+            self._block_arrived.notify_all()
+
+    def _wait_for_tail(self) -> None:
+        """Låt inspelningen löpa tail_s till efter tangentsläppet.
+
+        Anropas med _lock hållet; Condition.wait släpper det så att
+        callbacken kan lägga till block under tiden. Ett block som kommer
+        in efter (släpp + tail_s) innehåller allt fram till dess. En ström
+        som tystnat ger upp efter en kort tidsgräns i stället för att hänga.
+        """
+        if self._chunks is None or self._stream is None or self._tail_s <= 0:
+            return
+        wanted = time.monotonic() + self._tail_s
+        deadline = wanted + 2 * BLOCK / SAMPLE_RATE + 0.1
+        while self._last_block_t < wanted:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            self._block_arrived.wait(remaining)
 
     def _schedule_idle_close(self) -> None:
         """Anropas med _stream_lock hållet."""
