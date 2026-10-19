@@ -1050,13 +1050,13 @@ def make_tray(app: App):
 # -- CLI ----------------------------------------------------------------------------------
 
 
-def _setup_logging(path: Path = LOG_PATH) -> None:
+def _setup_logging() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler(path, encoding="utf-8"),
+            logging.FileHandler(LOG_PATH, encoding="utf-8"),
             # stderr, aldrig stdout: i motorläget är stdout protokollet.
             logging.StreamHandler(sys.stderr),
         ],
@@ -1105,12 +1105,9 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.engine:
-        # Egen loggfil: en värdapp kan köra motorn samtidigt som Viska.
-        _setup_logging(LOG_PATH.with_name("engine.log"))
-        gpu.cleanup_pending_removal()
         from viska import stdio
 
-        sys.exit(stdio.run())
+        stdio.main()
 
     _setup_logging()
     gpu.cleanup_pending_removal()  # före första CUDA-laddningen

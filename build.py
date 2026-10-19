@@ -2,8 +2,10 @@
 
     uv run python build.py         # CPU-bygge: portabelt, funkar överallt
     uv run python build.py --gpu   # tar även med CUDA-biblioteken (~+1,2 GB)
+    uv run python build.py --engine [--gpu]   # bara dikteringsmotorn (för Referat)
 
-Resultat: dist/Viska/Viska.exe samt dist/Viska-<version>[-gpu].zip.
+Resultat: dist/Viska/Viska.exe samt dist/Viska-<version>[-gpu].zip, eller
+dist/viska-engine/viska-engine.exe samt dist/viska-engine-<version>[-gpu].zip.
 Modellen bundlas inte — den laddas ner från Hugging Face första gången
 appen körs (kb-whisper-small ~0,5 GB på CPU, kb-whisper-large ~3 GB på GPU).
 """
@@ -19,6 +21,13 @@ ROOT = Path(__file__).parent
 sys.path.insert(0, str(ROOT))
 
 from viska import __version__  # noqa: E402
+
+# Motorbygget (viska-engine.exe) har inget fönster, ingen tray och ingen egen
+# polering: Referat visar gränssnittet och polerar via sina egna leverantörer.
+ENGINE_EXCLUDED = (
+    "tkinter", "sv_ttk", "darkdetect", "pystray", "PIL",
+    "llama_cpp", "openai_codex", "codex_cli_bin",
+)
 
 # Codex-SDK:n drar in en egen kopia av Codex-binären på 354 MB. Viska använder
 # den Codex användaren redan har installerad (viska.codex.binary), så paketet
@@ -57,7 +66,14 @@ def main() -> None:
     parser.add_argument(
         "--gpu", action="store_true", help="bunta med CUDA-bibliotek (cuBLAS/cuDNN)"
     )
+    parser.add_argument(
+        "--engine", action="store_true",
+        help="bygg bara dikteringsmotorn (viska --engine) som konsolprogram",
+    )
     args = parser.parse_args()
+    if args.engine:
+        build_engine(args.gpu)
+        return
 
     ico = make_icon()
     subprocess.run(
@@ -106,6 +122,34 @@ def main() -> None:
         root_dir=dist.parent, base_dir="Viska",
     )
     print(f"\nKlart: {dist}\\Viska.exe")
+    print(f"Paket: {zip_path}")
+
+
+def build_engine(gpu: bool) -> None:
+    """viska-engine.exe: motorläget som eget program. Ett konsolprogram, för
+    att stdin och stdout ska finnas; Referat startar det dolt."""
+    subprocess.run(
+        [
+            sys.executable, "-m", "PyInstaller",
+            "--noconfirm", "--clean", "--console",
+            "--name", "viska-engine",
+            "--collect-data", "faster_whisper",
+            *[arg for pkg in ENGINE_EXCLUDED for arg in ("--exclude-module", pkg)],
+            str(ROOT / "run_engine.py"),
+        ],
+        check=True,
+        cwd=ROOT,
+    )
+    dist = ROOT / "dist" / "viska-engine"
+    if gpu:
+        copy_nvidia_dlls(dist)
+    suffix = "-gpu" if gpu else ""
+    zip_path = shutil.make_archive(
+        str(ROOT / "dist" / f"viska-engine-{__version__}{suffix}"), "zip",
+        root_dir=dist,
+    )
+    size_mb = sum(f.stat().st_size for f in dist.rglob("*")) // 1_000_000
+    print(f"\nKlart: {dist / 'viska-engine.exe'} ({size_mb} MB)")
     print(f"Paket: {zip_path}")
 
 
