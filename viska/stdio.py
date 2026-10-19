@@ -59,7 +59,8 @@ class JsonFeedback(Feedback):
         self.out.send("status", text=text)
 
     def history_changed(self):
-        self.out.send("history", last=self._engine().last_text)
+        engine = self._engine()
+        self.out.send("history", last=engine.last_text, app=engine.last_app)
 
     def recording(self, active):
         self.out.send("recording", active=active)

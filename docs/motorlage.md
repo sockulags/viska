@@ -57,7 +57,7 @@ rad ger ett fel med `cmd: null`, och motorn fortsätter.
 | `level` | `value` | Ljudnivå (RMS), ungefär 20 gånger per sekund medan inspelningen pågår. |
 | `partial` | `text` | Ofärdig livetext, bara för förhandsvisning. |
 | `transcribing` | | Tangenten är släppt och ljudet skrivs ut. |
-| `history` | `last` | En diktering är klar och finns i historiken. |
+| `history` | `last`, `app` | En diktering är klar och finns i historiken. `app` är programmets namn ("Microsoft Outlook"), eller `null` om det inte gick att läsa. |
 | `nothing_heard` | | Det fanns ljud men inget tal. |
 | `idle` | | Klart; inget mer att visa. |
 | `failed` | | Utskriften misslyckades. |
@@ -83,6 +83,6 @@ Händelserna kan komma från olika trådar men skrivs alltid som hela rader.
 ← {"event": "level", "value": 0.0213}
 ← {"event": "recording", "active": false}
 ← {"event": "transcribing"}
-← {"event": "history", "last": "Vi ses på torsdag."}
+← {"event": "history", "last": "Vi ses på torsdag.", "app": "Microsoft Outlook"}
 ← {"event": "idle"}
 ```

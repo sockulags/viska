@@ -162,3 +162,16 @@ def test_motorn_som_egen_process():
     assert lines[0]["protocol"] == stdio.PROTOCOL
     assert lines[1]["cmd"] == "history"
     assert proc.returncode == 0
+
+
+def test_historiken_talar_om_programmet():
+    out = Collect()
+
+    class Engine:
+        last_text = "Vi ses på torsdag."
+        last_app = "Microsoft Outlook"
+
+    stdio.JsonFeedback(out, lambda: Engine()).history_changed()
+    assert out.last() == {
+        "event": "history", "last": "Vi ses på torsdag.", "app": "Microsoft Outlook",
+    }

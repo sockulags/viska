@@ -132,6 +132,28 @@ def foreground_app() -> str | None:
         return None
 
 
+def window_app_name(hwnd: int | None) -> str | None:
+    """Visningsnamnet för programmet som äger fönstret ("Microsoft Outlook"),
+    för historiken. None om fönstret är borta eller inte går att läsa."""
+    if not hwnd:
+        return None
+    try:
+        _tid, pid = win32process.GetWindowThreadProcessId(hwnd)
+        handle = win32api.OpenProcess(
+            win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+        )
+        try:
+            path = win32process.GetModuleFileNameEx(handle, 0)
+        finally:
+            win32api.CloseHandle(handle)
+    except Exception:
+        return None
+    process = path.rsplit("\\", 1)[-1].lower()
+    if process not in _NAME_CACHE:
+        _NAME_CACHE[process] = _display_name_for_path(path)
+    return _NAME_CACHE[process]
+
+
 def foreground_window() -> int | None:
     """HWND för fokuserat fönster (eller None). Fryses vid inspelningsstart
     så flow-läget kan skriva tillbaka den polerade texten i rätt fönster
