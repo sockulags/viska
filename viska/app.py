@@ -1,6 +1,7 @@
 """Viska – lokal diktering för Windows. Huvudprogram, tray och CLI."""
 
 import argparse
+import gc
 import logging
 import os
 import queue
@@ -461,6 +462,19 @@ class App:
 
     # -- Modell ------------------------------------------------------------------
 
+    def _release_models(self) -> None:
+        """Släpper de laddade modellerna INNAN nya laddas vid ett modellbyte.
+
+        Laddades den nya medan den gamla låg kvar fick grafikkortet hålla
+        båda en stund; på 4–8 GB räckte minnet inte och faster-whisper föll
+        tyst tillbaka på processorn. Andra språkets modell släpps också och
+        laddas om lat med de nya inställningarna. En diktering som skrivs ut
+        just nu behåller sin egen referens tills den är klar.
+        """
+        with self._session_lock:
+            self.transcribers = {}
+        gc.collect()
+
     def _load_model(self, lang: str, force: bool = False, quiet: bool = False) -> None:
         with self._loading_lock:
             if (not force and lang in self.transcribers) or lang in self._loading_langs:
@@ -475,6 +489,8 @@ class App:
                     f"Viska: laddar {namn} modell (första gången laddas den ner)…",
                     GRAY,
                 )
+            if force:
+                self._release_models()
             try:
                 model = self.cfg["model"] if lang == "sv" else self.cfg["model_en"]
                 t = Transcriber(
@@ -486,13 +502,7 @@ class App:
                 )
                 t.initial_prompt = self.cfg["initial_prompt"]
                 with self._session_lock:
-                    if force:
-                        # Modellbyte: släpp även andra språkets modell så den
-                        # laddas om lat med de nya inställningarna. Pågående
-                        # _finish behåller sin egen referens.
-                        self.transcribers = {lang: t}
-                    else:
-                        self.transcribers[lang] = t
+                    self.transcribers[lang] = t
                 self.status = f"redo – {t.model_name} ({t.device})"
                 self._refresh_tray_menu()
                 # Overlay bara när ingen inspelning pågår — "tryck F9" mitt
