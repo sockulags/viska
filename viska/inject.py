@@ -11,14 +11,18 @@ SendInput/KEYEVENTF_UNICODE — för appar där Ctrl+V inte fungerar
 (vissa terminaler och TUI-program).
 """
 
+import atexit
 import ctypes
 import logging
 import threading
 import time
 from ctypes import wintypes
 
+import win32api
 import win32clipboard
 import win32con
+import win32gui
+import win32process
 
 log = logging.getLogger(__name__)
 
@@ -167,16 +171,194 @@ def _set_clipboard_text(text: str, private: bool = False) -> bool:
         win32clipboard.EmptyClipboard()
         win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, text)
         if private:
-            zero = (0).to_bytes(4, "little")
-            for fmt in _PRIVACY_FORMATS:
-                try:
-                    fmt_id = win32clipboard.RegisterClipboardFormat(fmt)
-                    win32clipboard.SetClipboardData(fmt_id, zero)
-                except Exception:
-                    pass  # bäst ansträngning; inklistringen påverkas inte
+            _mark_private()
         return True
     finally:
         win32clipboard.CloseClipboard()
+
+
+def _mark_private() -> None:
+    """Anropas med klippbordet öppet."""
+    zero = (0).to_bytes(4, "little")
+    for fmt in _PRIVACY_FORMATS:
+        try:
+            fmt_id = win32clipboard.RegisterClipboardFormat(fmt)
+            win32clipboard.SetClipboardData(fmt_id, zero)
+        except Exception:
+            pass  # bäst ansträngning; inklistringen påverkas inte
+
+
+def _foreground_pid() -> int | None:
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    try:
+        return win32process.GetWindowThreadProcessId(hwnd)[1]
+    except Exception:
+        return None
+
+
+def _open_clipboard_as(hwnd, retries: int = 50, delay: float = 0.01) -> bool:
+    for _ in range(retries):
+        try:
+            win32clipboard.OpenClipboard(hwnd)
+            return True
+        except Exception:
+            time.sleep(delay)
+    return False
+
+
+# -- Fördröjd rendering: vet när målprogrammet har läst ----------------------
+#
+# Långsamma program (Electron, RDP) läser klippbordet en stund efter Ctrl+V.
+# Skrivs det över innan dess klistras fel text in, så nästa inklistring och
+# återställningen har fått vänta en fast marginal. Med fördröjd rendering
+# lägger vi bara ut ett löfte om text; Windows ber oss om den
+# (WM_RENDERFORMAT) när någon läser, och klippbordets fönster i det
+# ögonblicket är läsarens. Läser programmet i förgrunden vet vi att
+# inklistringen är hämtad och behöver inte vänta längre.
+#
+# Bara FÖRSTA läsningen syns: en klippbordsövervakare som läser före
+# målprogrammet (fjärrskrivbordets klippbordsdelning, Ditto) får texten
+# renderad åt sig, och målprogrammet läser sedan utan att vi märker det. Då
+# återstår den fasta marginalen — aldrig sämre än utan fördröjd rendering.
+
+
+class _Offer:
+    """En utlagd text och vilken process som väntas läsa den."""
+
+    def __init__(self, text: str, target_pid: int | None):
+        self.text = text
+        self.target_pid = target_pid
+        self.rendered_by: int | None = None  # första läsaren, för loggen
+        self.read_by_target = threading.Event()
+
+    def rendered_for(self, reader_pid: int | None) -> None:
+        if self.rendered_by is None:
+            self.rendered_by = reader_pid
+        if reader_pid is not None and reader_pid == self.target_pid:
+            self.read_by_target.set()
+
+
+class _DelayedClipboard:
+    _CLASS = "ViskaClipboardOwner"
+
+    def __init__(self):
+        self._hwnd = None
+        self._ready = threading.Event()
+        self._start_lock = threading.Lock()
+        self._offer_lock = threading.Lock()
+        self._offer: _Offer | None = None
+        self._set_data = None
+
+    def _ensure_window(self) -> bool:
+        with self._start_lock:
+            if not self._ready.is_set():
+                threading.Thread(
+                    target=self._pump, daemon=True, name="viska-clipboard"
+                ).start()
+                self._ready.wait(2)
+        return self._hwnd is not None
+
+    def _pump(self) -> None:
+        try:
+            # pywin32 tolkar SetClipboardData(fmt, NULL) som ett fel, men
+            # NULL är just hur fördröjd rendering begärs.
+            set_data = ctypes.WinDLL("user32").SetClipboardData
+            set_data.argtypes = (wintypes.UINT, wintypes.HANDLE)
+            set_data.restype = wintypes.HANDLE
+            self._set_data = set_data
+            wc = win32gui.WNDCLASS()
+            wc.lpfnWndProc = self._wndproc
+            wc.lpszClassName = self._CLASS
+            wc.hInstance = win32api.GetModuleHandle(None)
+            try:
+                win32gui.RegisterClass(wc)
+            except Exception:
+                pass  # redan registrerad (tester skapar flera ägare)
+            self._hwnd = win32gui.CreateWindow(
+                self._CLASS, "", 0, 0, 0, 0, 0,
+                win32con.HWND_MESSAGE, 0, wc.hInstance, None,
+            )
+        except Exception:
+            log.exception("Fördröjd klippbordsrendering är inte tillgänglig")
+            self._hwnd = None
+        finally:
+            self._ready.set()
+        if self._hwnd is not None:
+            win32gui.PumpMessages()
+
+    def offer(self, text: str, target_pid: int | None) -> "_Offer | None":
+        """Lägger ut texten som ett löfte. None om det inte gick; anroparen
+        sätter då texten direkt som förut."""
+        if not self._ensure_window():
+            return None
+        if not _open_clipboard_as(self._hwnd):
+            return None
+        offer = _Offer(text, target_pid)
+        try:
+            win32clipboard.EmptyClipboard()  # gör vårt fönster till ägare
+            with self._offer_lock:
+                self._offer = offer
+            self._set_data(win32con.CF_UNICODETEXT, None)
+            _mark_private()
+        finally:
+            win32clipboard.CloseClipboard()
+        return offer
+
+    def flush(self) -> None:
+        """Rendera ett obesvarat löfte innan processen avslutas, så att
+        texten finns kvar för en inklistring som ännu inte hunnit läsa."""
+        with self._offer_lock:
+            offer = self._offer
+        if offer is None or self._hwnd is None:
+            return
+        if not _open_clipboard_as(self._hwnd):
+            return
+        try:
+            if win32clipboard.GetClipboardOwner() == self._hwnd:
+                win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, offer.text)
+        finally:
+            win32clipboard.CloseClipboard()
+
+    def _wndproc(self, hwnd, msg, wparam, lparam):
+        if msg == win32con.WM_RENDERFORMAT:
+            with self._offer_lock:
+                offer = self._offer
+            if offer is not None and wparam == win32con.CF_UNICODETEXT:
+                # Läsaren har klippbordet öppet; datan sätts utan att vi
+                # öppnar det själva. Den MÅSTE sättas — annars blir
+                # inklistringen tom — så vem som läste är bara bonus.
+                pid = None
+                try:
+                    reader = win32clipboard.GetOpenClipboardWindow()
+                    pid = win32process.GetWindowThreadProcessId(reader)[1]
+                except Exception:
+                    pass
+                try:
+                    win32clipboard.SetClipboardData(
+                        win32con.CF_UNICODETEXT, offer.text
+                    )
+                except Exception:
+                    log.exception("Kunde inte rendera texten till klippbordet")
+                offer.rendered_for(pid)
+            return 0
+        if msg == win32con.WM_RENDERALLFORMATS:
+            self.flush()
+            return 0
+        if msg == win32con.WM_DESTROYCLIPBOARD:
+            # Någon annan (eller vi själva) tog över klippbordet: löftet
+            # gäller inte längre, och ingen ska vänta på det.
+            with self._offer_lock:
+                offer, self._offer = self._offer, None
+            if offer is not None:
+                offer.read_by_target.set()
+            return 0
+        return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
+
+
+_delayed = _DelayedClipboard()
+atexit.register(_delayed.flush)
 
 
 # Generationsräknare för klippbordsåterställning: vid snabba dikteringar
@@ -190,6 +372,7 @@ _saved_previous: str | None = None
 # klistras fel text in. Samma marginal som återställningen använder.
 _PASTE_SPACING_S = 0.8
 _last_paste_t = 0.0
+_last_offer: _Offer | None = None
 
 
 # Osynlig avskiljare (U+2063) — dyker aldrig upp i riktig text.
@@ -266,16 +449,18 @@ def inject(text: str, mode: str = "paste", restore_clipboard: bool = True) -> No
 
 
 def _paste(text: str, restore: bool) -> None:
-    global _generation, _saved_previous, _last_paste_t
+    global _generation, _saved_previous, _last_paste_t, _last_offer
     with _clipboard_lock:
         wait = _last_paste_t + _PASTE_SPACING_S - time.monotonic()
         if wait > 0:
-            time.sleep(wait)
+            _wait_until_read(_last_offer, wait)
         _generation += 1
         generation = _generation
         if restore and _saved_previous is None:
             _saved_previous = _get_clipboard_text()
-        if not _set_clipboard_text(text, private=True):
+        offer = _delayed.offer(text, _foreground_pid())
+        _last_offer = offer
+        if offer is None and not _set_clipboard_text(text, private=True):
             _type(text)  # klippbordet gick inte att ta – skriv i stället
             # Inklistringen uteblev: konsumera ev. sparat original direkt
             # (inuti låset — anropa inte restore_original_clipboard här).
@@ -288,15 +473,24 @@ def _paste(text: str, restore: bool) -> None:
         _last_paste_t = time.monotonic()
     if restore:
         threading.Thread(
-            target=_restore_later, args=(generation,), daemon=True
+            target=_restore_later, args=(generation, offer), daemon=True
         ).start()
 
 
-def _restore_later(generation: int) -> None:
+def _wait_until_read(offer: "_Offer | None", timeout: float) -> None:
+    """Väntar tills målprogrammet har hämtat texten, högst timeout."""
+    if offer is None:
+        time.sleep(timeout)
+    else:
+        offer.read_by_target.wait(timeout)
+
+
+def _restore_later(generation: int, offer: "_Offer | None" = None) -> None:
     global _saved_previous
     # Återställs klippbordet för tidigt hinner långsamma appar (Electron,
-    # RDP) inte läsa det och inklistringen blir tom — vänta rejält.
-    time.sleep(0.8)
+    # RDP) inte läsa det och inklistringen blir tom — vänta tills
+    # målprogrammet har läst, eller rejält om det inte går att se.
+    _wait_until_read(offer, _PASTE_SPACING_S)
     with _clipboard_lock:
         if generation != _generation:
             return  # en nyare diktering äger klippbordet nu
