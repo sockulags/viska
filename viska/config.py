@@ -27,7 +27,7 @@ CONFIG_BACKUP_PATH = CONFIG_DIR / "config.json.bak"
 LOG_PATH = CONFIG_DIR / "viska.log"
 HISTORY_PATH = CONFIG_DIR / "history.json"
 
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
 DEFAULTS = {
     # Configfilens format. Höjs bara när en nyckel byter betydelse och
@@ -238,7 +238,10 @@ DEFAULTS = {
     #   "closed"    – stängs direkt efter varje diktering.
     "mic_mode": "on_demand",
     # Hur länge strömmen får stå öppen efter en diktering i on_demand-läget.
-    "mic_idle_close_s": 20,
+    # Kort, så att mikrofonikonen släcks strax efter dikteringen; diktering
+    # direkt efter diktering slipper ändå öppningskostnaden. Ett Bluetooth-
+    # headset stängs alltid direkt (det står annars kvar i samtalsläge).
+    "mic_idle_close_s": 2,
     # Ljud som tas med från FÖRE tangenttrycket (kräver en redan öppen ström:
     # gäller "always", och "on_demand" när strömmen fortfarande är varm).
     "preroll_s": 0.25,
@@ -298,6 +301,13 @@ def migrate(cfg: dict, from_version: int | None = None) -> bool:
         keep_open = cfg.pop("keep_mic_open", None)
         if keep_open is False:
             cfg["mic_mode"] = "closed"
+        changed = True
+    if version < 3:
+        # Förvalet för stängning sänktes från 20 till 2 s. Ett sparat 20 är
+        # det gamla förvalet, inte ett val, så det följer med; andra värden
+        # har användaren satt själv.
+        if cfg.get("mic_idle_close_s") == 20:
+            cfg["mic_idle_close_s"] = 2
         changed = True
     if changed or cfg.get("config_version") != CONFIG_VERSION:
         cfg["config_version"] = CONFIG_VERSION

@@ -3,10 +3,12 @@
 Tre lägen (config: mic_mode) styr när strömmen är öppen, för Windows visar
 mikrofonikonen i aktivitetsfältet så länge den är det:
 
-- "on_demand" (förval): strömmen öppnas vid dikteringen och stängs en stund
-  efter den sista. Ikonen syns bara när Viska faktiskt lyssnar. Fördröjningen
-  (mic_idle_close_s) gör att diktering på diktering ändå slipper
-  öppningskostnaden och behåller förstarten.
+- "on_demand" (förval): strömmen öppnas vid dikteringen och stängs ett par
+  sekunder efter den sista. Ikonen syns bara när Viska faktiskt lyssnar.
+  Fördröjningen (mic_idle_close_s) gör att diktering på diktering ändå
+  slipper öppningskostnaden och behåller förstarten. Ett Bluetooth-headset
+  stängs direkt: så länge dess mikrofon är öppen står headsetet i
+  samtalsläge.
 - "always": strömmen står alltid öppen mot en liten ringbuffert i RAM.
   ~0,25 s förstart tas därifrån vid varje inspelning — att öppna en
   WASAPI-ström tar 100–300 ms och skulle annars klippa första stavelsen.
@@ -39,6 +41,10 @@ BLOCK = 800  # 50 ms per callback-block
 # ordet klingar ofta ut efter att fingret lämnat tangenten, och blocket som
 # fylls just då kommer först när det är fullt.
 TAIL_S = 0.12
+# Nivå (RMS) som räknas som riktigt ljud. Ett Bluetooth-headset som byter
+# till samtalsläge levererar ren tystnad tills länken är uppe; även ett
+# tyst rum ligger tydligt över det här.
+AUDIO_FLOOR = 1e-4
 
 
 ALWAYS = "always"
@@ -55,12 +61,15 @@ class Recorder:
         preroll_s: float = 0.25,
         idle_close_s: float = 20.0,
         tail_s: float = TAIL_S,
+        close_now=None,
     ):
         # Ett fast val, eller en funktion som väljer vid varje öppning.
         self._device = input_device
         self._mode = mode if mode in MODES else ON_DEMAND
         self._idle_close_s = max(0.0, float(idle_close_s))
         self._tail_s = max(0.0, float(tail_s))
+        # Anropas vid stopp: True = stäng direkt oavsett läge (headset).
+        self._close_now = close_now
         self._idle_timer: threading.Timer | None = None
         self._preroll_blocks = max(0, int(preroll_s * SAMPLE_RATE / BLOCK))
         self._ring = deque(maxlen=self._preroll_blocks + 2)
@@ -74,6 +83,7 @@ class Recorder:
         # Väcks av callbacken för varje nytt block; stop() väntar på svansen.
         self._block_arrived = threading.Condition(self._lock)
         self._last_block_t = 0.0
+        self._heard_audio = False
         self._stream_lock = threading.Lock()
         self._stream = None
         self._last_frame_t = 0.0
@@ -98,18 +108,33 @@ class Recorder:
     def stream_open(self) -> bool:
         return self._stream is not None
 
-    def start(self) -> None:
+    def start(self) -> bool:
+        """Börjar spela in. True om strömmen just öppnades (ingen förstart,
+        och ett headset kan behöva tid innan ljudet kommer)."""
         with self._stream_lock:
             self._cancel_idle_close()
             already_open = self._stream is not None
             self._ensure_stream()
             with self._lock:
+                self._heard_audio = False
                 # Förstart finns bara om strömmen redan var öppen: en nyss
                 # öppnad ström har ingen historik att ta med.
                 preroll = []
                 if already_open and self._preroll_blocks:
                     preroll = list(self._ring)[-self._preroll_blocks:]
                 self._chunks = preroll
+            return not already_open
+
+    def wait_for_audio(self, timeout: float) -> bool:
+        """Väntar tills inspelningen fått riktigt ljud. False vid tidsgräns."""
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            while not self._heard_audio:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or self._chunks is None:
+                    return False
+                self._block_arrived.wait(remaining)
+            return True
 
     def stop(self) -> np.ndarray:
         with self._stream_lock:
@@ -117,7 +142,7 @@ class Recorder:
                 self._wait_for_tail()
                 chunks, self._chunks = self._chunks, None
                 self._ring.clear()  # spara inget ljud mellan dikteringar
-            if self._mode == CLOSED:
+            if self._mode == CLOSED or self._should_close_now():
                 self._close_stream()
             elif self._mode == ON_DEMAND:
                 self._schedule_idle_close()
@@ -189,6 +214,8 @@ class Recorder:
         with self._lock:
             if self._chunks is not None:
                 self._chunks.append(indata.copy())
+                if self.level > AUDIO_FLOOR:
+                    self._heard_audio = True
             else:
                 self._ring.append(indata.copy())
             self._last_block_t = now
@@ -211,6 +238,13 @@ class Recorder:
             if remaining <= 0:
                 return
             self._block_arrived.wait(remaining)
+
+    def _should_close_now(self) -> bool:
+        try:
+            return bool(self._close_now and self._close_now())
+        except Exception:
+            log.exception("Kunde inte avgöra om mikrofonen ska stängas direkt")
+            return False
 
     def _schedule_idle_close(self) -> None:
         """Anropas med _stream_lock hållet."""

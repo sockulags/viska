@@ -18,6 +18,7 @@ class FakeStream:
     """Levererar block i realtidstakt tills den stoppas."""
 
     instances: list["FakeStream"] = []
+    silent = False  # ett headset som byter läge levererar tystnad
 
     def __init__(self, *, callback, blocksize, **_kwargs):
         self._callback = callback
@@ -39,7 +40,8 @@ class FakeStream:
             if not self._running.is_set():
                 break
             self.sent += 1
-            block = np.full((self._blocksize, 1), float(self.sent), dtype=np.float32)
+            value = 0.0 if FakeStream.silent else float(self.sent)
+            block = np.full((self._blocksize, 1), value, dtype=np.float32)
             self._callback(block, self._blocksize, None, None)
 
     def stop(self):
@@ -54,6 +56,7 @@ class FakeStream:
 @pytest.fixture(autouse=True)
 def fake_stream(monkeypatch):
     FakeStream.instances.clear()
+    FakeStream.silent = False
     monkeypatch.setattr(audio.sd, "InputStream", FakeStream)
     yield
     for stream in FakeStream.instances:
@@ -128,3 +131,38 @@ def test_forstart_finns_bara_nar_strommen_redan_var_oppen():
     # Förstarten är block som kom före start() — högst 0,25 s bakåt.
     assert numbers[0] <= before
     assert before - numbers[0] < round(0.25 * audio.SAMPLE_RATE / audio.BLOCK)
+
+
+def test_start_talar_om_nar_strommen_just_oppnades():
+    rec = audio.Recorder(mode=audio.ON_DEMAND, idle_close_s=5, tail_s=0)
+    assert rec.start() is True
+    rec.stop()
+    assert rec.start() is False  # fortfarande varm
+    rec.stop()
+    rec.close()
+
+
+def test_headset_stangs_direkt_aven_i_on_demand():
+    rec = audio.Recorder(
+        mode=audio.ON_DEMAND, idle_close_s=5, tail_s=0, close_now=lambda: True
+    )
+    rec.start()
+    rec.stop()
+    assert not rec.stream_open
+
+
+def test_vantar_pa_riktigt_ljud():
+    rec = audio.Recorder(mode=audio.CLOSED, tail_s=0)
+    rec.start()
+    assert rec.wait_for_audio(1.0)
+    rec.stop()
+
+
+def test_tystnad_fran_headsetet_ger_tidsgrans():
+    FakeStream.silent = True
+    rec = audio.Recorder(mode=audio.CLOSED, tail_s=0)
+    rec.start()
+    started = time.monotonic()
+    assert not rec.wait_for_audio(0.3)
+    assert time.monotonic() - started < 0.6
+    rec.stop()

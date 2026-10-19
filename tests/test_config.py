@@ -100,3 +100,15 @@ def test_historik_sparas_och_lases(appdata):
     assert config.load_history() == ["senaste", "äldre"]
     config.delete_history()
     assert config.load_history() == []
+
+
+def test_gamla_forvalet_for_mikrofonstangning_foljer_med():
+    cfg = {"config_version": 2, "mic_idle_close_s": 20}
+    assert config.migrate(cfg)
+    assert cfg["mic_idle_close_s"] == 2
+
+
+def test_eget_varde_for_mikrofonstangning_behalls():
+    cfg = {"config_version": 2, "mic_idle_close_s": 8}
+    config.migrate(cfg)
+    assert cfg["mic_idle_close_s"] == 8
