@@ -65,7 +65,9 @@ def test_utan_lofte_vantar_hela_marginalen():
 
 
 def _read_text() -> str | None:
-    win32clipboard.OpenClipboard()
+    # Andra program håller klippbordet en kort stund ibland; försök igen
+    # som Viska själv gör i stället för att fallera på första försöket.
+    assert inject._open_clipboard(), "klippbordet var upptaget i 0,5 s"
     try:
         if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
             return win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
