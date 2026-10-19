@@ -226,6 +226,43 @@ def choose(
     return Choice(index, name, bluetooth=False, avoided=_hardware(default_name))
 
 
+def _wasapi_inputs() -> tuple[list[tuple[int, str]], int | None]:
+    """WASAPI-ingångarna som (PortAudio-index, namn) och Windows standard."""
+    import sounddevice as sd
+
+    wasapi = next(
+        i for i, api in enumerate(sd.query_hostapis()) if "WASAPI" in api["name"]
+    )
+    api = sd.query_hostapis(wasapi)
+    inputs = [
+        (i, sd.query_devices(i)["name"])
+        for i in api["devices"]
+        if sd.query_devices(i)["max_input_channels"] > 0
+    ]
+    return inputs, api["default_input_device"]
+
+
+def list_inputs() -> list[dict]:
+    """Mikrofonerna att välja bland, för en inställningssida: namn, om det är
+    ett Bluetooth-headset och om det är Windows standard. Namnet är det som
+    sparas som input_device."""
+    try:
+        inputs, default = _wasapi_inputs()
+    except Exception:
+        log.exception("Kunde inte läsa WASAPI-enheterna")
+        return []
+    endpoints = capture_endpoints()
+    return [
+        {
+            "name": name,
+            "bluetooth": is_bluetooth(name, endpoints),
+            "default": index == default,
+        }
+        for index, name in inputs
+        if not _NOT_A_MIC.search(name)
+    ]
+
+
 def resolve(input_device, avoid_bluetooth: bool = True) -> Choice:
     """Mikrofonen att öppna nu. input_device är användarens uttryckliga val
     (namn eller index) och respekteras alltid; None betyder "Windows
@@ -241,16 +278,7 @@ def resolve(input_device, avoid_bluetooth: bool = True) -> Choice:
         return Choice(input_device, name, is_bluetooth(name, capture_endpoints()))
 
     try:
-        wasapi = next(
-            i for i, api in enumerate(sd.query_hostapis()) if "WASAPI" in api["name"]
-        )
-        api = sd.query_hostapis(wasapi)
-        inputs = [
-            (i, sd.query_devices(i)["name"])
-            for i in api["devices"]
-            if sd.query_devices(i)["max_input_channels"] > 0
-        ]
-        default = api["default_input_device"]
+        inputs, default = _wasapi_inputs()
     except Exception:
         log.exception("Kunde inte läsa WASAPI-enheterna")
         inputs, default = [], None

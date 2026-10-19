@@ -697,27 +697,15 @@ class App:
                 for failed in self._bind_keys(old, keep_on_error=True):
                     log.error("Kunde inte återta den gamla tangenten: %s", failed)
                 return errors[0]
-        model_changed = (
-            changes["model"] != old["model"]
-            or changes["model_en"] != old["model_en"]
-            or changes["device"] != old["device"]
-            or changes["compute_type"] != old["compute_type"]
-            or changes["beam_size"] != old["beam_size"]
-            # polish_backend avgör polish_shares_gpu (bara "builtin" delar
-            # VRAM med Whisper) – ett byte här kan därför ändra den
-            # VRAM-medvetna kvantiseringen precis som ett modellbyte.
-            or changes["polish_backend"] != old["polish_backend"]
-        )
-        mic_changed = (
-            changes["mic_mode"] != old["mic_mode"]
-            or changes["mic_idle_close_s"] != old["mic_idle_close_s"]
-        )
         history_persist_changed = changes["history_persist"] != old["history_persist"]
         # Fångas före update(): en ny token gör att uppdateringskollen mot ett
         # privat repo kan lyckas — kör om den nu så hämta-raden dyker upp utan
         # omstart (annars först vid nästa start).
         token_changed = changes.get("github_token", "") != old.get("github_token", "")
-        self.cfg.update(changes)
+        polish_backend_changed = changes["polish_backend"] != old["polish_backend"]
+        # Motorn tar hand om det som rör dikteringen: modellbyte, mikrofon,
+        # ljud, ordlista och språk.
+        self.engine.apply(changes)
         save(self.cfg)
         if history_persist_changed:
             if changes["history_persist"]:
@@ -747,30 +735,8 @@ class App:
                 self._on_update_available,
                 token=self.cfg.get("github_token", ""),
             )
-        if changes["polish_backend"] != old["polish_backend"]:
+        if polish_backend_changed:
             self.polishing.close_codex()
-        self.sounds.enabled = bool(changes["sounds"])
-        for t in self.transcribers.values():
-            t.initial_prompt = changes["initial_prompt"]
-        if mic_changed:
-            # Egen tråd: att öppna eller stänga en WASAPI-ström tar hundratals
-            # millisekunder och Spara-knappen ska inte frysa så länge.
-            threading.Thread(
-                target=self.recorder.set_mode,
-                args=(changes["mic_mode"], changes["mic_idle_close_s"]),
-                daemon=True,
-            ).start()
-        if changes["mic_avoid_bluetooth"] != old["mic_avoid_bluetooth"]:
-            # En öppen ström behåller sin mikrofon; öppna om så att valet
-            # gäller direkt och inte först vid nästa öppning.
-            threading.Thread(target=self.recorder.restart, daemon=True).start()
-        self.engine.language = changes["language"]
-        if model_changed:
-            # Byts inte synkront: pågående sessioner behåller sin referens,
-            # nya modellen svajpas in under sessionslåset när den är klar.
-            self.engine.load_model_async(self.language, force=True)
-        elif self.language not in self.transcribers:
-            self.engine.load_model_async(self.language)
         log.info("Inställningar sparade")
         return None
 
@@ -1084,14 +1050,15 @@ def make_tray(app: App):
 # -- CLI ----------------------------------------------------------------------------------
 
 
-def _setup_logging() -> None:
+def _setup_logging(path: Path = LOG_PATH) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler(LOG_PATH, encoding="utf-8"),
-            logging.StreamHandler(),
+            logging.FileHandler(path, encoding="utf-8"),
+            # stderr, aldrig stdout: i motorläget är stdout protokollet.
+            logging.StreamHandler(sys.stderr),
         ],
     )
 
@@ -1130,7 +1097,20 @@ def main() -> None:
     parser.add_argument(
         "--remove-gpu", action="store_true", help="ta bort nedladdade CUDA-bibliotek"
     )
+    parser.add_argument(
+        "--engine",
+        action="store_true",
+        help="kör dikteringsmotorn utan fönster, styrd med JSON över stdin/stdout",
+    )
     args = parser.parse_args()
+
+    if args.engine:
+        # Egen loggfil: en värdapp kan köra motorn samtidigt som Viska.
+        _setup_logging(LOG_PATH.with_name("engine.log"))
+        gpu.cleanup_pending_removal()
+        from viska import stdio
+
+        sys.exit(stdio.run())
 
     _setup_logging()
     gpu.cleanup_pending_removal()  # före första CUDA-laddningen

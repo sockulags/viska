@@ -74,6 +74,10 @@ class Feedback:
     def mic_failed(self) -> None:
         """Mikrofonen gick inte att öppna."""
 
+    def mic_changed(self, choice) -> None:
+        """Mikrofonen som används har bytts (mics.Choice): vilken, om den är
+        ett Bluetooth-headset och vilket headset som i så fall undveks."""
+
     def connecting(self) -> None:
         """Headsetets mikrofon ansluter; startsignalen väntar på ljud."""
 
@@ -279,6 +283,51 @@ class DictationEngine:
             with self._loading_lock:
                 self._loading_langs.discard(lang)
 
+    # Ändras någon av de här laddas modellen om. polish_backend avgör
+    # polish_shares_gpu (bara "builtin" delar VRAM med Whisper) – ett byte
+    # där kan därför ändra den VRAM-medvetna kvantiseringen precis som ett
+    # modellbyte.
+    _MODEL_KEYS = (
+        "model", "model_en", "device", "compute_type", "beam_size", "polish_backend",
+    )
+
+    def apply(self, changes: dict) -> None:
+        """Tar in ändrade inställningar och gör det som krävs för att de ska
+        gälla: modellbyte, mikrofonläge, ljud, ordlista och språk. En
+        pågående diktering behåller det den startade med."""
+        old = dict(self.cfg)
+        self.cfg.update(changes)
+        new = self.cfg
+        self.sounds.enabled = bool(new["sounds"])
+        for t in self.transcribers.values():
+            t.initial_prompt = new["initial_prompt"]
+        if (
+            new["mic_mode"] != old["mic_mode"]
+            or new["mic_idle_close_s"] != old["mic_idle_close_s"]
+        ):
+            # Egen tråd: att öppna eller stänga en WASAPI-ström tar hundratals
+            # millisekunder och den som sparar ska inte frysa så länge.
+            threading.Thread(
+                target=self.recorder.set_mode,
+                args=(new["mic_mode"], new["mic_idle_close_s"]),
+                daemon=True,
+            ).start()
+        if (
+            new["mic_avoid_bluetooth"] != old["mic_avoid_bluetooth"]
+            or new["input_device"] != old["input_device"]
+        ):
+            # En öppen ström behåller sin mikrofon; öppna om så att valet
+            # gäller direkt och inte först vid nästa öppning.
+            threading.Thread(target=self.recorder.restart, daemon=True).start()
+        if new["language"] in LANG_NAMES:
+            self.language = new["language"]
+        if any(new.get(k) != old.get(k) for k in self._MODEL_KEYS):
+            # Byts inte synkront: pågående sessioner behåller sin referens,
+            # nya modellen svajpas in under sessionslåset när den är klar.
+            self.load_model_async(self.language, force=True)
+        elif self.language not in self.transcribers:
+            self.load_model_async(self.language)
+
     def load_model_async(self, lang: str, force: bool = False, quiet: bool = False):
         threading.Thread(
             target=self.load_model, args=(lang, force, quiet), daemon=True
@@ -425,6 +474,7 @@ class DictationEngine:
         if choice != self._mic_choice:
             log.info("Mikrofon: %s", choice.describe())
             self._mic_choice = choice
+            self.feedback.mic_changed(choice)
         return choice.device
 
     def _start_live_worker(
@@ -517,6 +567,30 @@ class DictationEngine:
             daemon=True,
             name="viska-transcribe",
         ).start()
+
+    def cancel(self) -> bool:
+        """Avbryter en pågående inspelning utan att skriva in något. Fraser
+        som liveläget redan skrivit in står kvar. False om inget spelades in."""
+        # Tangenten släpps före sessionslåset: tangentens lås tas alltid
+        # före sessionslåset (start/stopp anropas med det hållet).
+        self.take_over_key()
+        with self._session_lock:
+            if not self.recorder.recording:
+                return False
+            watchdog, self._watchdog = self._watchdog, None
+            if watchdog is not None:
+                watchdog.cancel()
+            live, self._live = self._live, None
+            self.recorder.stop()
+            self.sounds.stop()
+            # En väntande startsignal (headsetet) gäller inte längre.
+            self._session_seq += 1
+            self.feedback.recording(False)
+        if live is not None:
+            threading.Thread(target=live.stop, daemon=True).start()
+        log.info("Dikteringen avbröts – ingenting skrevs in")
+        self.feedback.notice("Avbruten")
+        return True
 
     def _finish(
         self,
