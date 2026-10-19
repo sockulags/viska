@@ -42,7 +42,9 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   `src/main/dictation.ts` ([referat#134](https://github.com/sockulags/referat/pull/134)).
   Komponenten byggs från `scripts/viska-engine.ref` och publiceras med Referats nästa
   release, som görs först när allt är klart. Till dess: `REFERAT_DICTATION_ENGINE`.
-- [ ] 2.2 Statusrutan
+- [x] 2.2 Statusrutan — eget fönster ovanför aktivitetsfältet
+  ([referat#135](https://github.com/sockulags/referat/pull/135)). Inspelningsläget är inte
+  provat med mikrofon.
 - [ ] 2.3 Inställningar → Diktering
 - [ ] 2.4 Historik
 - [ ] 2.5 Introduktion
