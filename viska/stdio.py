@@ -22,7 +22,7 @@ import logging
 import sys
 import threading
 
-from viska import __version__, config, mics
+from viska import __version__, config, gpu, mics
 from viska.engine import DictationEngine, Feedback
 from viska.hotkey import HotkeyError, create_push_to_talk
 
@@ -285,6 +285,25 @@ def _engine_defaults() -> dict:
     # Värden äger historiken och sparar den själv.
     cfg["history_persist"] = False
     return cfg
+
+
+def main() -> None:
+    """Startpunkt för `viska --engine` och för viska-engine.exe."""
+    config.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[
+            # Egen loggfil: en värdapp kan köra motorn samtidigt som Viska.
+            logging.FileHandler(
+                config.LOG_PATH.with_name("engine.log"), encoding="utf-8"
+            ),
+            # stderr, aldrig stdout: stdout är protokollet.
+            logging.StreamHandler(sys.stderr),
+        ],
+    )
+    gpu.cleanup_pending_removal()
+    sys.exit(run())
 
 
 def run(stdin=None, stdout=None) -> int:

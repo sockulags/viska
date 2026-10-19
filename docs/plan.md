@@ -37,7 +37,10 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
 - [x] 1.2 `viska --engine` med JSON över stdin/stdout — protokollet i [motorlage.md](motorlage.md)
 
 **Fas 2 (Referat)**
-- [ ] 2.1 Motorn som komponent
+- [ ] 2.1 Motorn som komponent — Viska-delen klar: `build.py --engine [--gpu]` bygger
+  `viska-engine.exe` (254 MB för CPU, utan Tk, llama.cpp och Codex), provkörd. Kvar:
+  Referat-sidan. Komponenten publiceras med Referats nästa release, som görs först när
+  allt är klart.
 - [ ] 2.2 Statusrutan
 - [ ] 2.3 Inställningar → Diktering
 - [ ] 2.4 Historik
