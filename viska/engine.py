@@ -21,7 +21,7 @@ import numpy as np
 from viska import codex, commands, llm, metrics, mics
 from viska.audio import SAMPLE_RATE, Recorder
 from viska.config import load_history, save, save_history
-from viska.focus import focus_window, foreground_app, foreground_window
+from viska.focus import focus_window, foreground_app, foreground_window, window_app_name
 from viska.inject import inject
 from viska.sounds import Sounds
 from viska.stream import LiveWorker
@@ -182,6 +182,8 @@ class DictationEngine:
         self.transcribers: dict[str, Transcriber] = {}
         self.language = cfg["language"] if cfg["language"] in LANG_NAMES else "sv"
         self.last_text = ""
+        # Programmet senaste dikteringen skrevs in i ("Microsoft Outlook").
+        self.last_app: str | None = None
         # Sätts av den som binder dikteringstangenten: avaktiverar tangenten
         # utifrån och svarar True om en aktiv session togs över (maxtiden).
         self.take_over_key = lambda: False
@@ -642,6 +644,7 @@ class DictationEngine:
                 return
             if live_texts or text:
                 self.last_text = " ".join([*live_texts, text]).strip()
+                self.last_app = window_app_name(target_hwnd)
                 self.remember(self.last_text)
                 self.feedback.history_changed()
             if not text:
@@ -713,6 +716,7 @@ class DictationEngine:
         # Rå först i historiken: kraschar något efter det här går råversionen
         # ändå att hämta via traymenyn.
         self.last_text = raw
+        self.last_app = window_app_name(target_hwnd)
         self.remember(raw)
         self.feedback.history_changed()
         guard = InsertionGuard()
