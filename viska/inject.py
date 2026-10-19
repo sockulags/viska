@@ -4,7 +4,7 @@ Primär metod: klippbordet + Ctrl+V. Snabbast oavsett textlängd och helt
 säkert för svenska tecken. Dikteringen märks med Windows undantagsformat
 så att den varken hamnar i Win+V-historiken eller synkas till
 molnklippbordet — texten ska aldrig lämna datorn. Det gamla klippbordet
-(text) återställs efteråt.
+återställs efteråt, även när det var en bild, filer eller formaterad text.
 
 Reservmetod ("type" i config): pynput skriver tecken för tecken via
 SendInput/KEYEVENTF_UNICODE — för appar där Ctrl+V inte fungerar
@@ -150,6 +150,153 @@ def _get_clipboard_text() -> str | None:
         return None
     except Exception:
         return None
+    finally:
+        win32clipboard.CloseClipboard()
+
+
+# -- Ögonblicksbild av hela klippbordet ----------------------------------------
+#
+# Användarens klippbord ska tillbaka efter en inklistring även när det inte
+# var text: en bild, kopierade filer, formaterad text från Word. Alla format
+# som är vanliga minnesblock kopieras som bytes och sätts tillbaka likadant.
+# Format som är GDI-handtag (bitmappar, metafiler, paletter) eller privata
+# handtag går inte att kopiera så; Windows skapar de vanliga av dem på nytt
+# ur DIB-formatet.
+#
+# Vissa program (Excel, Word) skapar sina format först när någon läser dem,
+# vilket kan ta tid för stora markeringar. Ögonblicksbilden tar därför text,
+# filer och bilder först och slutar efter en tidsgräns; det som hann sparas
+# läggs tillbaka. Det är aldrig mindre än den text som sparades förut.
+
+_SNAPSHOT_BUDGET_S = 0.15
+_SNAPSHOT_LIMIT_BYTES = 64 * 1024 * 1024
+_FIRST_FORMATS = (
+    win32con.CF_UNICODETEXT,
+    win32con.CF_HDROP,
+    17,  # CF_DIBV5
+    win32con.CF_DIB,
+)
+_HANDLE_FORMATS = {
+    win32con.CF_BITMAP,
+    win32con.CF_METAFILEPICT,
+    win32con.CF_PALETTE,
+    win32con.CF_ENHMETAFILE,
+    win32con.CF_OWNERDISPLAY,
+    win32con.CF_DSPBITMAP,
+    win32con.CF_DSPMETAFILEPICT,
+    win32con.CF_DSPENHMETAFILE,
+}
+_GMEM_MOVEABLE = 0x0002
+
+_cb = ctypes.WinDLL("user32", use_last_error=True)
+_cb.EnumClipboardFormats.argtypes = (wintypes.UINT,)
+_cb.EnumClipboardFormats.restype = wintypes.UINT
+_cb.GetClipboardData.argtypes = (wintypes.UINT,)
+_cb.GetClipboardData.restype = wintypes.HANDLE
+_cb.SetClipboardData.argtypes = (wintypes.UINT, wintypes.HANDLE)
+_cb.SetClipboardData.restype = wintypes.HANDLE
+_k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_k32.GlobalSize.argtypes = (wintypes.HGLOBAL,)
+_k32.GlobalSize.restype = ctypes.c_size_t
+_k32.GlobalLock.argtypes = (wintypes.HGLOBAL,)
+_k32.GlobalLock.restype = ctypes.c_void_p
+_k32.GlobalUnlock.argtypes = (wintypes.HGLOBAL,)
+_k32.GlobalUnlock.restype = wintypes.BOOL
+_k32.GlobalAlloc.argtypes = (wintypes.UINT, ctypes.c_size_t)
+_k32.GlobalAlloc.restype = wintypes.HGLOBAL
+_k32.GlobalFree.argtypes = (wintypes.HGLOBAL,)
+_k32.GlobalFree.restype = wintypes.HGLOBAL
+
+
+class _Snapshot:
+    """Klippbordets format som (format, bytes). Tom lista = tomt klippbord."""
+
+    def __init__(self, items: list[tuple[int, bytes]], complete: bool = True):
+        self.items = items
+        self.complete = complete
+
+
+def _copyable(fmt: int) -> bool:
+    # 0x200–0x3FF är privata format och GDI-objekt: handtag, inte minne.
+    return fmt not in _HANDLE_FORMATS and not 0x200 <= fmt <= 0x3FF
+
+
+def _snapshot_clipboard() -> "_Snapshot | None":
+    """Hela klippbordet, eller None om det inte gick att öppna."""
+    if not _open_clipboard():
+        return None
+    try:
+        formats = []
+        fmt = 0
+        while True:
+            fmt = _cb.EnumClipboardFormats(fmt)
+            if not fmt:
+                break
+            if _copyable(fmt):
+                formats.append(fmt)
+        formats.sort(key=lambda f: (f not in _FIRST_FORMATS, _rank(f)))
+        deadline = time.monotonic() + _SNAPSHOT_BUDGET_S
+        items, total = [], 0
+        for fmt in formats:
+            if items and time.monotonic() > deadline:
+                log.info(
+                    "Klippbordet sparades bara delvis (%d av %d format): tidsgräns",
+                    len(items), len(formats),
+                )
+                return _Snapshot(items, complete=False)
+            data = _read_format(fmt)
+            if data is None:
+                continue
+            total += len(data)
+            if total > _SNAPSHOT_LIMIT_BYTES:
+                log.info("Klippbordet är för stort för att sparas helt")
+                return _Snapshot(items, complete=False)
+            items.append((fmt, data))
+        return _Snapshot(items)
+    finally:
+        win32clipboard.CloseClipboard()
+
+
+def _rank(fmt: int) -> int:
+    return _FIRST_FORMATS.index(fmt) if fmt in _FIRST_FORMATS else 0
+
+
+def _read_format(fmt: int) -> bytes | None:
+    """Anropas med klippbordet öppet."""
+    handle = _cb.GetClipboardData(fmt)
+    if not handle:
+        return None
+    size = _k32.GlobalSize(handle)
+    if not size:
+        return None
+    ptr = _k32.GlobalLock(handle)
+    if not ptr:
+        return None
+    try:
+        return ctypes.string_at(ptr, size)
+    finally:
+        _k32.GlobalUnlock(handle)
+
+
+def _restore_snapshot(snapshot: "_Snapshot") -> None:
+    if not _open_clipboard():
+        log.warning("Kunde inte öppna klippbordet för att återställa det")
+        return
+    try:
+        win32clipboard.EmptyClipboard()
+        for fmt, data in snapshot.items:
+            handle = _k32.GlobalAlloc(_GMEM_MOVEABLE, max(len(data), 1))
+            if not handle:
+                continue
+            ptr = _k32.GlobalLock(handle)
+            if not ptr:
+                _k32.GlobalFree(handle)
+                continue
+            ctypes.memmove(ptr, data, len(data))
+            _k32.GlobalUnlock(handle)
+            # Lyckas SetClipboardData äger Windows minnet; annars gör vi det.
+            if not _cb.SetClipboardData(fmt, handle):
+                _k32.GlobalFree(handle)
     finally:
         win32clipboard.CloseClipboard()
 
@@ -366,7 +513,7 @@ atexit.register(_delayed.flush)
 # återställa användarens ursprungliga klippbord (sparat en gång) — inte en
 # tidigare diktering.
 _generation = 0
-_saved_previous: str | None = None
+_saved_previous: "_Snapshot | None" = None
 # Minsta tid mellan klippbordsskrivningar: långsamma appar (Electron, RDP)
 # läser klippbordet asynkront efter Ctrl+V — skrivs det över för snabbt
 # klistras fel text in. Samma marginal som återställningen använder.
@@ -389,9 +536,8 @@ def grab_selection(timeout_s: float = 0.6) -> str | None:
     """
     global _generation, _saved_previous
     with _clipboard_lock:
-        original = _get_clipboard_text()
         if _saved_previous is None:
-            _saved_previous = original
+            _saved_previous = _snapshot_clipboard()
         _generation += 1
         if not _set_clipboard_text(_SENTINEL, private=True):
             return None
@@ -408,7 +554,7 @@ def grab_selection(timeout_s: float = 0.6) -> str | None:
         # fördröjda återställning vi just avbröt via generationsräknaren.
         previous, _saved_previous = _saved_previous, None
         if previous is not None:
-            _set_clipboard_text(previous)
+            _restore_snapshot(previous)
         else:
             _clear_clipboard()  # lämna aldrig kvar vaktposten
         return None
@@ -420,7 +566,7 @@ def restore_original_clipboard() -> None:
     with _clipboard_lock:
         previous, _saved_previous = _saved_previous, None
         if previous is not None:
-            _set_clipboard_text(previous)
+            _restore_snapshot(previous)
 
 
 def copy_to_clipboard(text: str) -> None:
@@ -457,7 +603,7 @@ def _paste(text: str, restore: bool) -> None:
         _generation += 1
         generation = _generation
         if restore and _saved_previous is None:
-            _saved_previous = _get_clipboard_text()
+            _saved_previous = _snapshot_clipboard()
         offer = _delayed.offer(text, _foreground_pid())
         _last_offer = offer
         if offer is None and not _set_clipboard_text(text, private=True):
@@ -466,7 +612,7 @@ def _paste(text: str, restore: bool) -> None:
             # (inuti låset — anropa inte restore_original_clipboard här).
             previous, _saved_previous = _saved_previous, None
             if previous is not None:
-                _set_clipboard_text(previous)
+                _restore_snapshot(previous)
             return
         time.sleep(0.05)  # låt klippbordet sätta sig innan Ctrl+V
         _send_ctrl_v()
@@ -496,7 +642,7 @@ def _restore_later(generation: int, offer: "_Offer | None" = None) -> None:
             return  # en nyare diktering äger klippbordet nu
         previous, _saved_previous = _saved_previous, None
         if previous is not None:
-            _set_clipboard_text(previous)
+            _restore_snapshot(previous)
 
 
 def _type(text: str) -> None:
