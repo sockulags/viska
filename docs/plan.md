@@ -37,10 +37,11 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
 - [x] 1.2 `viska --engine` med JSON över stdin/stdout — protokollet i [motorlage.md](motorlage.md)
 
 **Fas 2 (Referat)**
-- [ ] 2.1 Motorn som komponent — Viska-delen klar: `build.py --engine [--gpu]` bygger
-  `viska-engine.exe` (254 MB för CPU, utan Tk, llama.cpp och Codex), provkörd. Kvar:
-  Referat-sidan. Komponenten publiceras med Referats nästa release, som görs först när
-  allt är klart.
+- [x] 2.1 Motorn som komponent — `build.py --engine [--gpu]` bygger `viska-engine.exe`
+  (254 MB för CPU). Referat har komponenterna `dictation-cpu`/`dictation-gpu` och
+  `src/main/dictation.ts` ([referat#134](https://github.com/sockulags/referat/pull/134)).
+  Komponenten byggs från `scripts/viska-engine.ref` och publiceras med Referats nästa
+  release, som görs först när allt är klart. Till dess: `REFERAT_DICTATION_ENGINE`.
 - [ ] 2.2 Statusrutan
 - [ ] 2.3 Inställningar → Diktering
 - [ ] 2.4 Historik
