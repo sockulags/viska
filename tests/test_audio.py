@@ -1,0 +1,130 @@
+"""Mikrofoninspelningen mot en falsk ljudström: inget ljudkort behövs.
+
+Den falska strömmen levererar ett block i taget från en egen tråd, precis
+som PortAudio, och varje block bär sitt löpnummer som samplevärde så att
+testerna kan se exakt vilka block som kom med i inspelningen.
+"""
+
+import threading
+import time
+
+import numpy as np
+import pytest
+
+from viska import audio
+
+
+class FakeStream:
+    """Levererar block i realtidstakt tills den stoppas."""
+
+    instances: list["FakeStream"] = []
+
+    def __init__(self, *, callback, blocksize, **_kwargs):
+        self._callback = callback
+        self._blocksize = blocksize
+        self._running = threading.Event()
+        self._thread = None
+        self.sent = 0
+        FakeStream.instances.append(self)
+
+    def start(self):
+        self._running.set()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        period = self._blocksize / audio.SAMPLE_RATE
+        while self._running.is_set():
+            time.sleep(period)
+            if not self._running.is_set():
+                break
+            self.sent += 1
+            block = np.full((self._blocksize, 1), float(self.sent), dtype=np.float32)
+            self._callback(block, self._blocksize, None, None)
+
+    def stop(self):
+        self._running.clear()
+        if self._thread is not None:
+            self._thread.join(timeout=1)
+
+    def close(self):
+        pass
+
+
+@pytest.fixture(autouse=True)
+def fake_stream(monkeypatch):
+    FakeStream.instances.clear()
+    monkeypatch.setattr(audio.sd, "InputStream", FakeStream)
+    yield
+    for stream in FakeStream.instances:
+        stream.stop()
+
+
+def _block_numbers(samples: np.ndarray) -> list[int]:
+    return [int(v) for v in samples[:: audio.BLOCK]]
+
+
+def test_stopp_tar_med_svansen_efter_slappet():
+    rec = audio.Recorder(mode=audio.CLOSED, tail_s=0.12)
+    rec.start()
+    time.sleep(0.3)
+    stream = FakeStream.instances[-1]
+    released_at = stream.sent
+    samples = rec.stop()
+
+    numbers = _block_numbers(samples)
+    assert numbers == list(range(1, len(numbers) + 1)), "inga block får tappas"
+    tail_blocks = numbers[-1] - released_at
+    # 0,12 s efter släppet är minst två 50 ms-block till.
+    assert tail_blocks >= 2
+
+
+def test_stopp_utan_svans_tar_bara_det_som_kommit():
+    rec = audio.Recorder(mode=audio.CLOSED, tail_s=0)
+    rec.start()
+    time.sleep(0.2)
+    stream = FakeStream.instances[-1]
+    released_at = stream.sent
+    samples = rec.stop()
+    assert _block_numbers(samples)[-1] <= released_at + 1
+
+
+def test_tyst_strom_hanger_inte_stoppet():
+    rec = audio.Recorder(mode=audio.CLOSED, tail_s=0.12)
+    rec.start()
+    time.sleep(0.1)
+    FakeStream.instances[-1].stop()  # enheten försvann
+    started = time.monotonic()
+    rec.stop()
+    assert time.monotonic() - started < 0.5
+
+
+def test_closed_stanger_strommen_efter_stopp():
+    rec = audio.Recorder(mode=audio.CLOSED)
+    rec.start()
+    assert rec.stream_open
+    rec.stop()
+    assert not rec.stream_open
+
+
+def test_on_demand_haller_strommen_oppen_tills_tiden_gatt():
+    rec = audio.Recorder(mode=audio.ON_DEMAND, idle_close_s=0.2, tail_s=0)
+    rec.start()
+    rec.stop()
+    assert rec.stream_open
+    time.sleep(0.4)
+    assert not rec.stream_open
+
+
+def test_forstart_finns_bara_nar_strommen_redan_var_oppen():
+    rec = audio.Recorder(mode=audio.ALWAYS, preroll_s=0.25, tail_s=0)
+    time.sleep(0.4)
+    stream = FakeStream.instances[-1]
+    before = stream.sent
+    rec.start()
+    samples = rec.stop()
+    rec.close()
+    numbers = _block_numbers(samples)
+    # Förstarten är block som kom före start() — högst 0,25 s bakåt.
+    assert numbers[0] <= before
+    assert before - numbers[0] < round(0.25 * audio.SAMPLE_RATE / audio.BLOCK)
