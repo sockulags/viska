@@ -34,7 +34,7 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
 - [x] 1.1 Dela `app.py` i session, motor och gränssnitt (Tk fortsätter fungera ovanpå) —
   `engine.py` (diktering, modeller, mikrofon, historik), `polishing.py` (dagens
   poleringsmotorer) och `app.py` (Tk, tray, inställningar, F8, uppdatering).
-- [ ] 1.2 `viska --engine` med JSON över stdin/stdout
+- [x] 1.2 `viska --engine` med JSON över stdin/stdout — protokollet i [motorlage.md](motorlage.md)
 
 **Fas 2 (Referat)**
 - [ ] 2.1 Motorn som komponent
