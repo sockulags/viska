@@ -56,9 +56,10 @@ def test_vantan_slutar_nar_malet_har_last():
 
 
 def test_utan_lofte_vantar_hela_marginalen():
-    started = time.monotonic()
+    # perf_counter: time.monotonic går i steg om ~16 ms på Windows.
+    started = time.perf_counter()
     inject._wait_until_read(None, 0.2)
-    assert time.monotonic() - started >= 0.19
+    assert time.perf_counter() - started >= 0.19
 
 
 # -- Riktiga klippbordet --------------------------------------------------------

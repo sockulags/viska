@@ -21,7 +21,8 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   stängs direkt, och startljudet väntar på riktigt ljud när headsetets mikrofon öppnas.
 - [x] 0.3c Headsetet används fritt när det redan är i ett samtal — "samtal" betyder att
   Teams, Zoom eller en webbläsare har mikrofonen öppen, samma regel som Referat använder.
-- [ ] 0.4 Grafikminne vid modellbyte
+- [x] 0.4 Grafikminne vid modellbyte — under själva omladdningen går det inte att diktera,
+  och misslyckas den nya modellen finns ingen gammal att falla tillbaka på.
 - [ ] 0.5 Klippbordet återställer mer än text
 - [ ] 0.7 Tester för mikrofon, liveläge, klippbord och tangentstyrning
 - [ ] 0.6 Mät utfyllnadsord — *väntar på dig: riktiga dikteringar*
