@@ -49,7 +49,9 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   ([referat#136](https://github.com/sockulags/referat/pull/136)) och sektionen på
   inställningssidan ([referat#137](https://github.com/sockulags/referat/pull/137)).
   Tangenten skrivs in som text; en knapp som fångar tangenten saknas än.
-- [ ] 2.4 Historik
+- [x] 2.4 Historik — sidan Diktat med en veckas diktat, kopiera, ta bort och rätta till
+  ordlistan ([referat#138](https://github.com/sockulags/referat/pull/138)). Viska skickar
+  programmets namn med varje diktat.
 - [ ] 2.5 Introduktion
 - [ ] 2.6 Ordlistan till motorn
 - [ ] 2.7 Polering som tillval
