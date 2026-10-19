@@ -45,7 +45,10 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
 - [x] 2.2 Statusrutan — eget fönster ovanför aktivitetsfältet
   ([referat#135](https://github.com/sockulags/referat/pull/135)). Inspelningsläget är inte
   provat med mikrofon.
-- [ ] 2.3 Inställningar → Diktering
+- [x] 2.3 Inställningar → Diktering — sparade inställningar och motorstart
+  ([referat#136](https://github.com/sockulags/referat/pull/136)) och sektionen på
+  inställningssidan ([referat#137](https://github.com/sockulags/referat/pull/137)).
+  Tangenten skrivs in som text; en knapp som fångar tangenten saknas än.
 - [ ] 2.4 Historik
 - [ ] 2.5 Introduktion
 - [ ] 2.6 Ordlistan till motorn
