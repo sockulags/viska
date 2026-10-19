@@ -53,7 +53,10 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   ordlistan ([referat#138](https://github.com/sockulags/referat/pull/138)). Viska skickar
   programmets namn med varje diktat.
 - [ ] 2.5 Introduktion
-- [ ] 2.6 Ordlistan till motorn
+- [x] 2.6 Ordlistan till motorn — varianter blir ersättningar, rätta stavningar blir
+  Whispers ledtråd (högst 40), skickas igen när ordlistan ändras
+  ([referat#139](https://github.com/sockulags/referat/pull/139)). Motorn matchar
+  varianten exakt; mötesordlistans tolerans för delade ord och bindestreck saknas där.
 - [ ] 2.7 Polering som tillval
 - [ ] 2.8 Flytt från Viska
 - [ ] 2.9 Sista fristående Viska-versionen
