@@ -1,34 +1,26 @@
 """Viska – lokal diktering för Windows. Huvudprogram, tray och CLI."""
 
 import argparse
-import gc
 import logging
 import os
 import queue
 import sys
 import threading
-import time
 import tkinter as tk
 import urllib.error
-from collections import deque
 from pathlib import Path
 
-import numpy as np
-
-from viska import (
-    __version__, autostart, codex, commands, gpu, llm, metrics, mics, update,
-)
-from viska.audio import SAMPLE_RATE, Recorder
+from viska import __version__, autostart, codex, gpu, llm, mics, update
 from viska.config import (
     CONFIG_DIR,
     CONFIG_PATH,
     LOG_PATH,
     delete_history,
     load,
-    load_history,
     save,
     save_history,
 )
+from viska.engine import DictationEngine, Feedback
 from viska.focus import (
     focus_window,
     foreground_app,
@@ -44,136 +36,131 @@ from viska.inject import (
     restore_original_clipboard,
 )
 from viska.overlay import BLUE, GRAY, GREEN, RED, Overlay, ToneMenu
+from viska.polishing import Polishing
 from viska.settings import SettingsWindow
-from viska.sounds import Sounds
-from viska.stream import LiveWorker
 from viska.transcribe import Transcriber
 
 log = logging.getLogger("viska")
-
-LANG_NAMES = {"sv": "svensk", "en": "engelsk"}
-
-# Flow-läget: tar poleringen längre tid än så här skrivs råtexten in i
-# stället. Diktering får aldrig blockeras av en trög eller hängande modell.
-FLOW_POLISH_TIMEOUT_S = 10.0
-# Hur länge startsignalen väntar på att ett Bluetooth-headset ska byta till
-# samtalsläge. Microsoft anger "flera sekunder" som värsta fall.
-HEADSET_CONNECT_TIMEOUT_S = 3.0
 
 # Poleringstangenten: två tryck inom det här fönstret öppnar tonvalsmenyn i
 # stället för att polera direkt. Ett enkeltryck fördröjs så länge (och bara så
 # länge) så trycken kan skiljas åt — ingen annan extra fördröjning.
 POLISH_DOUBLE_TAP_S = 0.4
 
-# Sökbredd för flow-lägets förhandsvisning (vanlig diktering behåller sin).
-LIVE_PREVIEW_BEAM = 1
+class TkFeedback(Feedback):
+    """Gör statusruta och trayikon av dikteringsmotorns meddelanden."""
 
-class InsertionGuard:
-    """Avgör vem som får skriva in text för EN diktering — exakt en vinnare.
-
-    Under en flow-polering finns tre kandidater: den polerade texten, råtexten
-    (användaren orkade inte vänta, eller poleringen tog för lång tid) och
-    ingenting (användaren avbröt). Utan en gemensam vakt är det lätt att få två
-    av dem: ett sent modellsvar som landar efter att råtexten redan skrivits in
-    dubblerar dikteringen i dokumentet, och ett avbrott hinner inte stoppa en
-    inskrivning som redan var på väg.
-
-    Redan inskriven livetext rörs aldrig — den hör till en annan mekanism och
-    ska inte städas bort av ett avbrott.
-    """
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self._winner: str | None = None
-
-    def claim(self, who: str) -> bool:
-        """True bara för den första som gör anspråk. Efter ett avbrott
-        returnerar den alltid False."""
-        with self._lock:
-            if self._winner is not None:
-                return False
-            self._winner = who
-            return True
-
-    def cancel(self) -> None:
-        with self._lock:
-            if self._winner is None:
-                self._winner = "cancelled"
+    def __init__(self, app: "App"):
+        self.app = app
 
     @property
-    def winner(self) -> str | None:
-        with self._lock:
-            return self._winner
+    def overlay(self) -> Overlay:
+        return self.app.overlay
 
-    @property
-    def cancelled(self) -> bool:
-        return self.winner == "cancelled"
+    def status(self, text: str) -> None:
+        self.app.status = text
+        self.app._refresh_tray_menu()
+
+    def history_changed(self) -> None:
+        self.app._refresh_tray_menu()
+
+    def recording(self, active: bool) -> None:
+        self.app._set_tray_recording(active)
+
+    def model_loading(self, language: str) -> None:
+        self.overlay.show(
+            f"Viska: laddar {language} modell (första gången laddas den ner)…",
+            GRAY,
+        )
+
+    def model_ready(self, device: str) -> None:
+        self.overlay.show(
+            f"Viska redo ({device.upper()}) – tryck "
+            f"{self.app.cfg['hotkey'].upper()} och prata",
+            GREEN,
+            auto_hide_ms=3500,
+        )
+
+    def model_failed(self) -> None:
+        self.overlay.show(
+            "Viska: modellen kunde inte laddas – se loggen", RED, auto_hide_ms=8000
+        )
+
+    def not_ready(self) -> None:
+        self.overlay.show(
+            "Viska: modellen laddas fortfarande…", GRAY, auto_hide_ms=1500
+        )
+
+    def busy(self) -> None:
+        self.overlay.show(
+            "Viska: vänta – förra dikteringen skrivs ut…", GRAY, auto_hide_ms=1200
+        )
+
+    def mic_failed(self) -> None:
+        self.overlay.show("Viska: mikrofonfel – se loggen", RED, auto_hide_ms=4000)
+
+    def connecting(self) -> None:
+        self.overlay.show("Ansluter headsetets mikrofon …", GRAY)
+
+    def listening(self) -> None:
+        self.overlay.show("Spelar in", RED, meter=True, timer=True)
+
+    def partial(self, text: str) -> None:
+        if len(text) > 70:
+            text = "…" + text[-70:]
+        self.overlay.show(f"● {text}", RED)
+
+    def transcribing(self) -> None:
+        self.overlay.show("Transkriberar", BLUE)
+
+    def nothing_heard(self) -> None:
+        self.overlay.show("(inget tal uppfattades)", GRAY, auto_hide_ms=1500)
+
+    def idle(self) -> None:
+        self.overlay.hide()
+
+    def failed(self) -> None:
+        self.overlay.show(
+            "Viska: fel vid transkribering – se loggen", RED, auto_hide_ms=4000
+        )
+
+    def polishing(self, insert_raw, cancel) -> None:
+        self.overlay.show(
+            "Polerar",
+            BLUE,
+            actions=[("Infoga råtext", insert_raw), ("Avbryt", cancel)],
+            timer=True,
+        )
+
+    def inserting(self) -> None:
+        self.overlay.show("Skriver in", BLUE)
+
+    def flow_done(self, message: str) -> None:
+        self.overlay.show(message, GREEN, auto_hide_ms=1600)
+
+    def notice(self, message: str) -> None:
+        self.overlay.show(message, GRAY, auto_hide_ms=2500)
 
 
 class App:
     def __init__(self, root: tk.Tk, cfg: dict):
         self.cfg = cfg
         self.root = root
-        self.sounds = Sounds(cfg["sounds"])
-        self._mic_choice = None
-        self.recorder = Recorder(
-            self._choose_mic,
-            cfg["mic_mode"],
-            cfg["preroll_s"],
-            cfg["mic_idle_close_s"],
-            close_now=self._mic_is_bluetooth,
+        self.icon = None  # sätts av make_tray
+        self.status = "startar…"
+        self.polishing = Polishing(cfg)
+        self.engine = DictationEngine(cfg, TkFeedback(self), self.polishing)
+        self.engine.take_over_key = (
+            lambda: self.hotkey is not None and self.hotkey.force_stop()
         )
         self.overlay = Overlay(root, level_source=lambda: self.recorder.level)
         self.tone_menu = ToneMenu(root)
-        self.history: deque[str] = deque(maxlen=int(cfg["history_size"]))
-        if cfg["history_persist"]:
-            # Nyast först på disk också — skiva till history_size INNAN
-            # deque-konstruktion: en deque(iterable, maxlen) trunkerar
-            # annars svansen (de äldsta) i stället för att behålla de N
-            # nyaste när den sparade listan är längre än gränsen.
-            persisted = load_history()[: int(cfg["history_size"])]
-            self.history = deque(persisted, maxlen=int(cfg["history_size"]))
         self.update_tag: str | None = None
         self.update_release: update.Release | None = None
         # Spärr mot att den inbyggda uppdateraren startas flera gånger (dubbel-
         # klick på hämta-raden, bekräftelsedialog redan öppen).
         self._updating = threading.Event()
-        self.transcribers: dict[str, Transcriber] = {}
-        self.language = cfg["language"] if cfg["language"] in LANG_NAMES else "sv"
-        self.last_text = ""
-        self.status = "startar…"
-        self.icon = None  # sätts av make_tray
-        self._transcribing = threading.Event()
-        self._watchdog = None
         self._quit = threading.Event()
-        # Serialiserar start/stopp av en dikteringssession (hotkey-trådarna
-        # och maxtidstimern) och fryser vilket språk sessionen hade.
-        self._session_lock = threading.Lock()
-        # Räknas upp för varje diktering, så att en fördröjd startsignal kan
-        # se om den fortfarande gäller samma diktering.
-        self._session_seq = 0
-        self._session_language = self.language
-        self._session_transcriber: Transcriber | None = None
-        self._session_prompt: str | None = None
-        self._session_inject = cfg["inject_mode"]
-        # Flow-läge för den aktiva sessionen: fryses vid start likt de andra
-        # session-värdena, så att en ändring i Inställningar mitt i en
-        # diktering inte kan byta beteende halvvägs.
-        self._session_flow = False
-        self._session_polish_prompt = llm.resolve_polish_prompt(cfg)
-        # Fönstret dikteringen gäller, fryst vid start. Flow-läget skriver
-        # tillbaka den polerade texten hit så resultatet hamnar rätt även om
-        # fokus hunnit flytta under poleringen.
-        self._session_target_hwnd: int | None = None
-        # Tidpunkten dikteringen stoppades — nollpunkten för väntan som
-        # användaren faktiskt upplever (stopp → text på skärmen).
-        self._session_stopped_at = 0.0
-        # En modelladdning per språk i taget — utan spärren skulle varje
-        # tangenttryck i en profilerad app starta ännu en 3 GB-laddning.
-        self._loading_langs: set[str] = set()
-        self._loading_lock = threading.Lock()
-        self._live: LiveWorker | None = None
-        self._live_texts: list[str] = []  # fraser som redan skrivits in
         # Tkinter är huvudtrådsbundet; trayn lägger UI-jobb här i stället.
         self._ui_queue: queue.Queue = queue.Queue()
         self._settings: SettingsWindow | None = None
@@ -182,8 +169,6 @@ class App:
         # raderar och skriver om samma filer som den första.
         self._gpu_busy = threading.Event()
         self._llm_busy = threading.Event()
-        # Codex-motorn: en process som lever mellan poleringarna.
-        self._codex: codex.CodexPolisher | None = None
         # Tangentkonflikter (annat program äger tangenten) ska aldrig hindra
         # appen från att starta — men trayikonen finns inte förrän main()
         # kört klart make_tray(), så notiserna köas här och flushas därifrån.
@@ -193,36 +178,47 @@ class App:
         self.hotkey = None
         self.polish_key = None
         self.polish_menu_key = None
-        self._polisher: llm.Polisher | None = None
-        # Skapandet av poleringsmodellen serialiseras: både F8-flödet, flow-
-        # lägets förladdning och själva flow-poleringen kan annars försöka
-        # instansiera Polisher samtidigt.
-        self._polisher_lock = threading.Lock()
         self._polishing = threading.Event()
-        # Fjärrbackendens nåbarhet cachas: flow-beslutet vid start (live
-        # eller inte) behöver veta om poleringen är tillgänglig, men ett
-        # synkront HTTP-anrop på hotkey-tråden skulle fördröja "Spelar in"
-        # upp till 2 s när tjänsten är nere. Cachen läses där och uppdateras
-        # i bakgrunden.
-        self._remote_reachable = False
-        if llm.is_remote(cfg):
-            threading.Thread(
-                target=self._refresh_remote_reachable, daemon=True
-            ).start()
         # Dikteringstangenten, poleringstangenten och tonvalsmenyns tangent
         # registreras i ett svep. En upptagen tangent får aldrig hindra
         # appen från att starta — notisen köas till trayikonen finns.
         for notice in self._bind_keys(cfg, keep_on_error=True):
             log.warning("Tangenten kunde inte registreras: %s", notice)
             self._startup_notices.append(notice)
-        threading.Thread(
-            target=self._load_model, args=(self.language,), daemon=True
-        ).start()
+        self.engine.load_model_async(self.language)
         if cfg["check_updates"]:
             update.check_async(
                 __version__, self._on_update_available, token=cfg.get("github_token", "")
             )
         self._poll_quit()
+
+    # Motorns tillstånd, läst av trayn, inställningarna och F8-poleringen.
+    @property
+    def recorder(self):
+        return self.engine.recorder
+
+    @property
+    def sounds(self):
+        return self.engine.sounds
+
+    @property
+    def history(self):
+        return self.engine.history
+
+    @property
+    def transcribers(self):
+        return self.engine.transcribers
+
+    @property
+    def language(self) -> str:
+        return self.engine.language
+
+    @property
+    def last_text(self) -> str:
+        return self.engine.last_text
+
+    def set_language(self, lang: str) -> None:
+        self.engine.set_language(lang)
 
     # -- Tangentbindningar ---------------------------------------------------------
 
@@ -254,7 +250,10 @@ class App:
         double_tap = bool(cfg.get("polish_double_tap"))
         try:
             self.hotkey = create_push_to_talk(
-                cfg["hotkey"], cfg["hold_threshold_s"], self._on_start, self._on_stop
+                cfg["hotkey"],
+                cfg["hold_threshold_s"],
+                self.engine.start,
+                self.engine.stop,
             )
         except HotkeyError as e:
             errors.append(str(e))
@@ -449,434 +448,6 @@ class App:
             except Exception:
                 pass  # kosmetiskt
 
-    def _remember(self, text: str) -> None:
-        """Lägger till i historiken och, om opt-in-läget är på, sparar den
-        till disk. RAM-listan uppdateras alltid — disksparningen är bara en
-        spegling av den, aldrig den enda källan under körning."""
-        self.history.appendleft(text)
-        if self.cfg["history_persist"]:
-            try:
-                save_history(self.history)
-            except OSError:
-                log.exception("Kunde inte spara historiken till disk")
-
-    # -- Modell ------------------------------------------------------------------
-
-    def _release_models(self) -> None:
-        """Släpper de laddade modellerna INNAN nya laddas vid ett modellbyte.
-
-        Laddades den nya medan den gamla låg kvar fick grafikkortet hålla
-        båda en stund; på 4–8 GB räckte minnet inte och faster-whisper föll
-        tyst tillbaka på processorn. Andra språkets modell släpps också och
-        laddas om lat med de nya inställningarna. En diktering som skrivs ut
-        just nu behåller sin egen referens tills den är klar.
-        """
-        with self._session_lock:
-            self.transcribers = {}
-        gc.collect()
-
-    def _load_model(self, lang: str, force: bool = False, quiet: bool = False) -> None:
-        with self._loading_lock:
-            if (not force and lang in self.transcribers) or lang in self._loading_langs:
-                return
-            self._loading_langs.add(lang)
-        try:
-            namn = LANG_NAMES[lang]
-            if not quiet:
-                self.status = f"laddar {namn} modell…"
-                self._refresh_tray_menu()
-                self.overlay.show(
-                    f"Viska: laddar {namn} modell (första gången laddas den ner)…",
-                    GRAY,
-                )
-            if force:
-                self._release_models()
-            try:
-                model = self.cfg["model"] if lang == "sv" else self.cfg["model_en"]
-                t = Transcriber(
-                    model,
-                    self.cfg["device"],
-                    self.cfg["beam_size"],
-                    self.cfg["compute_type"],
-                    llm.polish_shares_gpu(self.cfg),
-                )
-                t.initial_prompt = self.cfg["initial_prompt"]
-                with self._session_lock:
-                    self.transcribers[lang] = t
-                self.status = f"redo – {t.model_name} ({t.device})"
-                self._refresh_tray_menu()
-                # Overlay bara när ingen inspelning pågår — "tryck F9" mitt
-                # i en pågående diktering vore direkt vilseledande.
-                if not quiet and not self.recorder.recording:
-                    self.overlay.show(
-                        f"Viska redo ({t.device.upper()}) – tryck "
-                        f"{self.cfg['hotkey'].upper()} och prata",
-                        GREEN,
-                        auto_hide_ms=3500,
-                    )
-            except Exception:
-                log.exception("Kunde inte ladda modellen för %s", lang)
-                self.status = "fel vid modelladdning"
-                self._refresh_tray_menu()
-                if not quiet:
-                    self.sounds.error()
-                    self.overlay.show(
-                        "Viska: modellen kunde inte laddas – se loggen",
-                        RED,
-                        auto_hide_ms=8000,
-                    )
-        finally:
-            with self._loading_lock:
-                self._loading_langs.discard(lang)
-
-    def set_language(self, lang: str) -> None:
-        self.language = lang
-        self.cfg["language"] = lang
-        save(self.cfg)
-        if lang not in self.transcribers:
-            threading.Thread(
-                target=self._load_model, args=(lang,), daemon=True
-            ).start()
-
-    # -- Diktering (anropas från hotkey-trådarna) ---------------------------------
-
-    def _on_start(self) -> bool:
-        """Returnerar True om en inspelning startade (PushToTalk-kontraktet)."""
-        with self._session_lock:
-            # Profil för appen som ska ta emot texten. Språk byts ALDRIG
-            # automatiskt — bara om profilen uttryckligen anger det.
-            fg = foreground_app()
-            profile = self.cfg["app_profiles"].get(fg, {}) if fg else {}
-            lang = profile.get("language") or self.language
-            transcriber = self.transcribers.get(lang)
-            if transcriber is None and lang != self.language:
-                # Profilens språkmodell är inte laddad ännu: kör aktiva
-                # språket nu och ladda profilens i bakgrunden till nästa
-                # gång (quiet: overlay tillhör inspelningen).
-                threading.Thread(
-                    target=self._load_model, args=(lang, False, True), daemon=True
-                ).start()
-                lang = self.language
-                transcriber = self.transcribers.get(lang)
-            if transcriber is None:
-                self.overlay.show(
-                    "Viska: modellen laddas fortfarande…", GRAY, auto_hide_ms=1500
-                )
-                return False
-            # Maxtidsstoppet släpper tangenten innan inspelningen hunnit
-            # tas; ett nytt tryck i det glappet får inte skriva över den.
-            if self._transcribing.is_set() or self.recorder.recording:
-                self.overlay.show(
-                    "Viska: vänta – förra dikteringen skrivs ut…",
-                    GRAY,
-                    auto_hide_ms=1200,
-                )
-                return False
-            try:
-                fresh_stream = self.recorder.start()
-            except Exception:
-                log.exception("Kunde inte starta inspelningen")
-                self.sounds.error()
-                self.overlay.show(
-                    "Viska: mikrofonfel – se loggen", RED, auto_hide_ms=4000
-                )
-                return False
-            self._session_language = lang
-            self._session_transcriber = transcriber
-            # Fånga mål-HWND nu — dikteringstangenten är en global hotkey som
-            # OS:et konsumerar, så förgrundsfönstret här är appen texten gäller.
-            self._session_target_hwnd = foreground_window()
-            # Global ordlista + appens egen, kombinerat.
-            self._session_prompt = (
-                ", ".join(
-                    p
-                    for p in (
-                        self.cfg["initial_prompt"],
-                        profile.get("initial_prompt", ""),
-                    )
-                    if p
-                )
-                or None
-            )
-            self._session_inject = profile.get(
-                "inject_mode", self.cfg["inject_mode"]
-            )
-            # Flow: polera automatiskt? Profilen ärver den globala standarden.
-            # Poleringsuppgiften är appens egen, annars den globala — samma
-            # väg som F8-flödet väljer stil. Är poleringen inte tillgänglig
-            # (ej nedladdad, backend nere) körs sessionen som VANLIG diktering
-            # med liveinskrivning i stället — annars skulle en kvarglömd flow-
-            # flagga (t.ex. efter "Ta bort poleringen") tyst stänga av live och
-            # falla tillbaka på råtext varje gång. Tillgänglighetskollen är
-            # icke-blockerande (cachen läses) så hotkey-tråden aldrig
-            # hänger på nätverket; vanlig diktering utan flow kortsluter och
-            # betalar inget.
-            flow_flag = bool(profile.get("flow", self.cfg["flow"]))
-            if flow_flag and llm.is_remote(self.cfg):
-                # Håll cachen färsk till nästa diktering utan att blockera nu.
-                threading.Thread(
-                    target=self._refresh_remote_reachable, daemon=True
-                ).start()
-            self._session_flow = flow_flag and self._flow_polish_available()
-            # Poleringsuppgift via den gemensamma upplösningen (mall/fritext →
-            # global) så flow och F8 alltid väljer samma stil.
-            self._session_polish_prompt = llm.resolve_polish_prompt(
-                self.cfg, profile
-            )
-            self._session_seq += 1
-            self._set_tray_recording(True)
-            if fresh_stream and self._mic_is_bluetooth():
-                # Headsetet byter till samtalsläge först nu och levererar
-                # tystnad tills det är klart. Startljudet väntar på riktigt
-                # ljud, så att ingen börjar prata in i tystnaden.
-                self.overlay.show("Ansluter headsetets mikrofon …", GRAY)
-                threading.Thread(
-                    target=self._announce_when_audio,
-                    args=(self._session_seq,),
-                    daemon=True,
-                    name="viska-headset",
-                ).start()
-            else:
-                self.sounds.start()
-                self.overlay.show("Spelar in", RED, meter=True, timer=True)
-            if self._watchdog is not None:  # ska inte hända, men läck aldrig
-                self._watchdog.cancel()
-            self._watchdog = threading.Timer(
-                self.cfg["max_recording_s"], self._on_max_time
-            )
-            self._watchdog.daemon = True
-            self._watchdog.start()
-            self._live_texts = []
-            if self._session_flow:
-                # Flow: ingen liveinskrivning. Pillen får gärna förhandsvisa
-                # pågående text (preview_only), men inget skrivs in förrän
-                # dikteringen stoppas och hela transkriptet poleras. Börja
-                # ladda poleringsmodellen redan nu så den hinner bli varm.
-                self._warmup_flow_polisher()
-                if self._live_enabled(transcriber):
-                    self._start_live_worker(transcriber, lang, preview_only=True)
-            elif self._live_enabled(transcriber):
-                self._start_live_worker(transcriber, lang, preview_only=False)
-            return True
-
-    def _announce_when_audio(self, seq: int) -> None:
-        heard = self.recorder.wait_for_audio(HEADSET_CONNECT_TIMEOUT_S)
-        with self._session_lock:
-            if seq != self._session_seq or not self.recorder.recording:
-                return  # dikteringen hann ta slut
-            if not heard:
-                log.warning(
-                    "Inget ljud från headsetet efter %.0f s", HEADSET_CONNECT_TIMEOUT_S
-                )
-            self.sounds.start()
-            self.overlay.show("Spelar in", RED, meter=True, timer=True)
-
-    def _mic_is_bluetooth(self) -> bool:
-        return self._mic_choice is not None and self._mic_choice.bluetooth
-
-    def _choose_mic(self):
-        """Anropas av Recorder varje gång strömmen öppnas."""
-        choice = mics.resolve(
-            self.cfg["input_device"], self.cfg["mic_avoid_bluetooth"]
-        )
-        if choice != self._mic_choice:
-            log.info("Mikrofon: %s", choice.describe())
-            self._mic_choice = choice
-        return choice.device
-
-    def _start_live_worker(
-        self, transcriber: Transcriber, lang: str, preview_only: bool
-    ) -> None:
-        self._live = LiveWorker(
-            transcriber,
-            self.recorder,
-            lang,
-            # I preview_only-läget committas aldrig något, så on_commit anropas
-            # aldrig — men lämna inget som kan skriva in text mitt i flow.
-            on_commit=(lambda _t: None) if preview_only else self._on_live_commit,
-            on_partial=self._on_live_partial,
-            interval_s=self.cfg["live_interval_s"],
-            commit_silence_s=self.cfg["live_commit_silence_s"],
-            initial_prompt=self._session_prompt,
-            preview_only=preview_only,
-            # Flow: förhandsvisningen syns bara i pillen och ersätts av den
-            # riktiga transkriberingen vid stopp, så den får kosta mindre
-            # GPU. Vanligt liveläge skriver in sina fraser på riktigt och
-            # behåller därför full sökbredd.
-            beam_size=LIVE_PREVIEW_BEAM if preview_only else None,
-        )
-        self._live.start()
-
-    def _live_enabled(self, transcriber: Transcriber) -> bool:
-        live = self.cfg["live"]
-        if live == "auto":
-            return transcriber.device == "cuda"
-        return bool(live)
-
-    def _on_live_commit(self, text: str) -> None:
-        text = self._post_process(text)
-        self._live_texts.append(text)
-        try:
-            # Mellanslag mellan fraser oavsett append_space — annars klistras
-            # nästa fras fast i den förra. Men aldrig efter en radbrytning.
-            if not text.endswith("\n"):
-                text += " "
-            inject(text, self._session_inject, self.cfg["restore_clipboard"])
-        except Exception:
-            # Frasen finns kvar i last_text (traymenyn: Kopiera senaste).
-            log.exception("Kunde inte skriva in livefrasen")
-
-    def _on_live_partial(self, partial: str) -> None:
-        if partial:
-            if len(partial) > 70:
-                partial = "…" + partial[-70:]
-            self.overlay.show(f"● {partial}", RED)
-
-    def _on_max_time(self) -> None:
-        # force_stop() avgör atomiskt vem som äger stoppet — bara om vi tog
-        # en aktiv session får vi anropa _on_stop, annars stoppade
-        # användaren precis själv.
-        if self.hotkey is not None and self.hotkey.force_stop():
-            log.info("Maxtid nådd (%s s) – stoppar", self.cfg["max_recording_s"])
-            self._on_stop()
-
-    def _on_stop(self) -> None:
-        with self._session_lock:
-            watchdog, self._watchdog = self._watchdog, None
-            if watchdog is not None:
-                watchdog.cancel()
-            self._set_tray_recording(False)
-            self._session_stopped_at = time.perf_counter()
-            # Ljudet fryses FÖRE livearbetaren stoppas. Att vänta in arbetaren
-            # först kunde hålla mikrofonen öppen i upp till tio sekunder efter
-            # att tangenten släppts, och allt som sades under den väntan
-            # hamnade i inspelningen. Nu släpps mikrofonen direkt; arbetaren
-            # avvecklas på transkriberingstråden, där dess sista committade
-            # frames räknas av mot det redan frysta ljudet.
-            live, self._live = self._live, None
-            audio = self.recorder.stop()
-            # Stoppljudet först när svansen är inspelad, annars kan det
-            # komma med i ljudet via högtalarna.
-            self.sounds.stop()
-            self._transcribing.set()
-            self.overlay.show("Transkriberar", BLUE)
-            lang = self._session_language
-            transcriber = self._session_transcriber
-            prompt = self._session_prompt
-            inject_mode = self._session_inject
-            flow = self._session_flow
-            polish_prompt = self._session_polish_prompt
-            target_hwnd = self._session_target_hwnd
-        threading.Thread(
-            target=self._finish,
-            args=(
-                audio, lang, transcriber, live, prompt, inject_mode,
-                flow, polish_prompt, target_hwnd,
-            ),
-            daemon=True,
-            name="viska-transcribe",
-        ).start()
-
-    def _finish(
-        self,
-        audio: np.ndarray,
-        lang: str,
-        transcriber: Transcriber,
-        live: LiveWorker | None,
-        prompt: str | None,
-        inject_mode: str,
-        flow: bool = False,
-        polish_prompt: str = "",
-        target_hwnd: int | None = None,
-    ) -> None:
-        try:
-            # Avveckla livearbetaren här, inte under sessionslåset: ljudet är
-            # redan fryst, så väntan kostar bara den här tråden. Listan läses
-            # EFTER att arbetaren stannat — då kan inget pass hinna committa
-            # en fras som saknas i last_text.
-            committed = live.stop() if live is not None else 0
-            live_texts = list(self._live_texts)
-            if committed:
-                audio = audio[committed:]
-            if live_texts:
-                # Sätts innan sluttranskriberingen: kastar den ett fel ska
-                # de redan inskrivna fraserna ändå finnas i "Kopiera
-                # senaste diktering".
-                self.last_text = " ".join(live_texts).strip()
-            text = ""
-            transcribe_ms = 0.0
-            too_short = len(audio) < 0.3 * SAMPLE_RATE
-            silent = audio.size == 0 or float(np.abs(audio).max()) < 0.003
-            if not (too_short or silent) and transcriber is not None:
-                with metrics.Timer() as t:
-                    text = transcriber.transcribe(audio, lang, initial_prompt=prompt)
-                transcribe_ms = t.ms
-                text = self._post_process(text)
-            if flow and text:
-                # Flow-läge: polera hela transkriptet innan inskrivning.
-                # live_texts är alltid tomt här (preview_only committar aldrig).
-                # _transcribing hålls kvar genom polering + inskrivning (som en
-                # längre vanlig diktering): nästa inspelning kan inte starta och
-                # skriva in före den polerade texten, och fönstret dikteringen
-                # gällde behåller fokus. Poleringen har en hård tidsgräns
-                # (FLOW_POLISH_TIMEOUT_S) så väntan aldrig blir oändlig.
-                self._finish_flow(
-                    text, inject_mode, polish_prompt, target_hwnd, lang,
-                    audio_s=len(audio) / SAMPLE_RATE, transcribe_ms=transcribe_ms,
-                )
-                return
-            if live_texts or text:
-                self.last_text = " ".join([*live_texts, text]).strip()
-                self._remember(self.last_text)
-                self._refresh_tray_menu()
-            if not text:
-                if not live_texts and not (too_short or silent):
-                    self.overlay.show(
-                        "(inget tal uppfattades)", GRAY, auto_hide_ms=1500
-                    )
-                else:
-                    self.overlay.hide()
-                return
-            if self.cfg["append_space"] and not text.endswith("\n"):
-                text += " "
-            with metrics.Timer() as t:
-                inject(text, inject_mode, self.cfg["restore_clipboard"])
-            self._record_metrics(
-                audio, transcribe_ms, t.ms, len(text), live=bool(live_texts)
-            )
-            self.overlay.hide()
-        except Exception:
-            log.exception("Transkriberingen misslyckades")
-            self.sounds.error()
-            self.overlay.show(
-                "Viska: fel vid transkribering – se loggen", RED, auto_hide_ms=4000
-            )
-        finally:
-            self._transcribing.clear()
-
-    def _post_process(self, text: str) -> str:
-        """Ersättningsregler före röstkommandon: en regel ska aldrig kunna
-        råka bygga ihop frasen som blir en radbrytning."""
-        text = commands.apply_replacements(text, self.cfg["replacements"])
-        return commands.apply(text, self.cfg["voice_commands"])
-
-    def _elapsed_since_stop(self) -> float:
-        """Millisekunder sedan dikteringen stoppades (0 om okänt)."""
-        t0 = self._session_stopped_at
-        return (time.perf_counter() - t0) * 1000 if t0 else 0.0
-
-    def _record_metrics(
-        self, audio, transcribe_ms: float, inject_ms: float, chars: int, live: bool
-    ) -> None:
-        metrics.record(
-            audio_s=len(audio) / SAMPLE_RATE,
-            transcribe_ms=transcribe_ms,
-            inject_ms=inject_ms,
-            total_ms=self._elapsed_since_stop(),
-            chars=chars,
-            live=live,
-        )
-
     # -- Rätta senaste dikteringen (bygger ersättningsregler) -----------------------
 
     def request_correction(self) -> None:
@@ -899,238 +470,6 @@ class App:
         save(self.cfg)
         log.info("Ersättningsregler sparade (%d st)", len(replacements))
 
-    # -- Flow-läge (automatisk polering före inskrivning) ---------------------------
-
-    def _finish_flow(
-        self,
-        raw: str,
-        inject_mode: str,
-        polish_prompt: str,
-        target_hwnd: int | None,
-        lang: str = "sv",
-        audio_s: float = 0.0,
-        transcribe_ms: float = 0.0,
-    ) -> None:  # noqa: PLR0913
-        """Polerar hela dikteringen och skriver in resultatet på en gång.
-        Körs synkront på transkriberingstråden med _transcribing kvar satt:
-        nästa inspelning kan inte starta förrän texten skrivits in, så den
-        polerade texten kan aldrig hamna efter en senare diktering och
-        fönstret dikteringen gällde har normalt kvar fokus.
-
-        Både råtexten (först) och den polerade texten (överst) hamnar i
-        historiken. Är poleringen otillgänglig, kastar fel eller tar för
-        lång tid skrivs råtexten in precis som en vanlig diktering –
-        dikteringen får aldrig gå förlorad."""
-        # Rå först i historiken: kraschar något efter det här går råversionen
-        # ändå att hämta via traymenyn.
-        self.last_text = raw
-        self._remember(raw)
-        self._refresh_tray_menu()
-        guard = InsertionGuard()
-        with metrics.Timer() as t:
-            polished, reason = self._polish_for_flow(
-                raw, polish_prompt, lang, guard
-            )
-        polish_ms = t.ms
-        if guard.cancelled:
-            # Avbrutet: ingenting skrivs in för den här dikteringen. Redan
-            # inskriven livetext står kvar — den hör till en annan mekanism
-            # och ska inte städas bort av ett avbrott.
-            log.info("Flow-dikteringen avbröts – ingenting skrevs in")
-            self.overlay.show(
-                "Avbruten – dikteringen finns i historiken",
-                GRAY,
-                auto_hide_ms=2500,
-            )
-            return
-        if polished and polished.strip() and polished.strip() != raw.strip():
-            if not guard.claim("polerad"):
-                log.info("Poleringen kom efter att något annat skrivits in")
-                self.overlay.hide()
-                return
-            self.last_text = polished
-            self._remember(polished)  # polerad överst
-            self._refresh_tray_menu()
-            out = polished
-            done_text = "Klar – polerad"
-        else:
-            if not guard.claim("rå"):
-                self.overlay.hide()
-                return
-            out = raw
-            done_text = {
-                "råtext vald": "Råtexten infogad",
-                "tidsgräns": "Poleringen svarade inte – råtexten infogad",
-                "fel": "Poleringen misslyckades – råtexten infogad",
-                "otillgänglig": "Poleringen är inte tillgänglig – råtexten infogad",
-            }.get(reason, "Klar – råtexten infogad")
-        if self.cfg["append_space"] and not out.endswith("\n"):
-            out += " "
-        # Poleringen kan ha tagit tid; se till att texten skrivs in i det
-        # fönster dikteringen gällde även om fokus hunnit flytta. I normalfallet
-        # (fokus kvar) är det en no-op och ingen fokusstöld sker. Är fönstret
-        # borta skrivs ingenting: att klistra in i vad som råkar ha fokus nu är
-        # värre än att låta texten ligga kvar i historiken.
-        if target_hwnd and not focus_window(target_hwnd):
-            log.warning("Målfönstret finns inte kvar – texten skrivs inte in")
-            self.overlay.show(
-                "Fönstret är borta – texten finns i historiken",
-                GRAY,
-                auto_hide_ms=3000,
-            )
-            return
-        with metrics.Timer() as t:
-            inject(out, inject_mode, self.cfg["restore_clipboard"])
-        metrics.record(
-            audio_s=audio_s,
-            transcribe_ms=transcribe_ms,
-            inject_ms=t.ms,
-            total_ms=self._elapsed_since_stop(),
-            chars=len(out),
-            polish_ms=polish_ms,
-            flow=True,
-        )
-        # Kort kvittens: i flow-läget är det inte självklart VAD som hamnade i
-        # dokumentet. Vanlig diktering säger fortfarande ingenting — där syns
-        # resultatet direkt och pillen ska hålla tyst.
-        self.overlay.show(done_text, GREEN, auto_hide_ms=1600)
-
-    def _polish_for_flow(
-        self, text: str, style: str, lang: str = "sv", guard=None
-    ):
-        """Polerar text medan pillen visar två utvägar: skriv in råtexten nu,
-        eller avbryt. Returnerar den polerade texten, eller None när råtexten
-        ska skrivas in (fel, tidsgräns eller användarens val). Ett avbrott
-        märks på vakten (guard.cancelled), inte på returvärdet.
-
-        Väntan är inte längre en blind join: en polering som tar några sekunder
-        ska gå att hoppa över utan att sitta av tidsgränsen.
-
-        Returnerar (text, orsak). Orsaken driver statusraden: en råtext som
-        skrivs in för att modellen teg ska säga just det, inte se ut som ett
-        normalt resultat."""
-        if not llm.installed(self.cfg):
-            return None, "otillgänglig"
-        result: dict[str, str] = {}
-        # Sätts från GUI-tråden när en knapp trycks; läses här.
-        choice: dict[str, str] = {}
-        done = threading.Event()
-
-        def work():
-            try:
-                result["text"] = self._polish_with(self.cfg, text, style, lang)
-            except Exception as e:  # noqa: BLE001
-                log.warning(
-                    "Flow-poleringen misslyckades (%s) – skriver in råtext",
-                    codex.friendly_error(e),
-                )
-            finally:
-                done.set()
-
-        self.overlay.show(
-            "Polerar",
-            BLUE,
-            actions=[
-                ("Infoga råtext", lambda: choice.setdefault("pick", "raw")),
-                ("Avbryt", lambda: choice.setdefault("pick", "cancel")),
-            ],
-            timer=True,
-        )
-        threading.Thread(target=work, daemon=True, name="viska-flow-polish").start()
-        deadline = time.monotonic() + FLOW_POLISH_TIMEOUT_S
-        while not done.is_set() and not choice and time.monotonic() < deadline:
-            time.sleep(0.03)
-        # Knapparna bort så att nästa status inte ärver dem.
-        self.overlay.show("Skriver in", BLUE)
-        if choice.get("pick") == "cancel":
-            log.info("Flow-poleringen avbröts av användaren")
-            if guard is not None:
-                guard.cancel()
-            return None, "avbruten"
-        if choice.get("pick") == "raw":
-            log.info("Användaren valde råtext i stället för att vänta")
-            return None, "råtext vald"
-        if not done.is_set():
-            # Tråden lever kvar och slutför i tysthet (modellen blir varm till
-            # nästa gång) – men vi väntar inte, råtexten skrivs in nu.
-            log.warning("Flow-poleringen tog för lång tid – skriver in råtext")
-            return None, "tidsgräns"
-        text_out = result.get("text")
-        return text_out, ("polerad" if text_out else "fel")
-
-    def _polish_with(
-        self, cfg: dict, text: str, style: str, lang: str = "sv"
-    ) -> str:
-        """All polering går genom den här: Codex, annan fjärrtjänst eller den
-        inbyggda modellen. cfg skickas med så att Inställningarnas testknapp
-        kan prova ett osparat val utan att starta en egen motor."""
-        backend = cfg["polish_backend"]
-        if backend == "codex":
-            return self._get_codex().polish(
-                text,
-                style,
-                lang,
-                model=cfg.get("polish_codex_model"),
-                effort=cfg.get("polish_codex_effort"),
-            )
-        if llm.is_remote(cfg):
-            return llm.polish_remote(cfg, text, style, lang)
-        polisher = self._get_polisher()
-        polisher.ensure_loaded()
-        return polisher.polish(text, style, lang)
-
-    def _get_codex(self) -> codex.CodexPolisher:
-        with self._polisher_lock:
-            if self._codex is None:
-                self._codex = codex.CodexPolisher(self.cfg)
-            return self._codex
-
-    def _get_polisher(self) -> llm.Polisher:
-        with self._polisher_lock:
-            if self._polisher is None:
-                self._polisher = llm.Polisher(self.cfg)
-            return self._polisher
-
-    def _warmup_flow_polisher(self) -> None:
-        """Börjar ladda in poleringsmodellen i bakgrunden när en flow-session
-        startar, så att den är varm när dikteringen stoppas. Idempotent –
-        ensure_loaded returnerar direkt om modellen redan är laddad."""
-        backend = self.cfg["polish_backend"]
-        if backend != "codex" and (llm.is_remote(self.cfg) or not llm.installed(self.cfg)):
-            return
-
-        def work():
-            try:
-                # Codex startar en process (~0,3 s) och de andra laddar en
-                # modell i VRAM — båda är värda att ha gjort innan dikteringen
-                # stoppas. Fjärrtjänster har inget att värma.
-                if backend == "codex":
-                    self._get_codex().ensure_loaded()
-                else:
-                    self._get_polisher().ensure_loaded()
-            except Exception:
-                log.exception("Kunde inte förbereda poleringen")
-
-        threading.Thread(
-            target=work, daemon=True, name="viska-flow-warmup"
-        ).start()
-
-    def _flow_polish_available(self) -> bool:
-        """Icke-blockerande koll vid start om poleringen kan användas för flow
-        (annars körs sessionen som vanlig diktering med liveinskrivning). För
-        fjärrbackender läses den bakgrundsuppdaterade cachen — ett synkront
-        HTTP-anrop på hotkey-tråden skulle fördröja "Spelar in". builtin är en
-        billig filkoll."""
-        if llm.is_remote(self.cfg):
-            return self._remote_reachable
-        return llm.installed(self.cfg)
-
-    def _refresh_remote_reachable(self) -> None:
-        try:
-            self._remote_reachable = llm.remote_reachable(self.cfg)
-        except Exception:
-            self._remote_reachable = False
-
     # -- Inställningar ---------------------------------------------------------------
 
     def request_settings(self) -> None:
@@ -1148,10 +487,8 @@ class App:
         # bakgrunden och uppdaterar sin egen statusrad. builtin är en billig
         # filkoll och görs direkt.
         if llm.is_remote(self.cfg):
-            polish_ready = self._remote_reachable
-            threading.Thread(
-                target=self._refresh_remote_reachable, daemon=True
-            ).start()
+            polish_ready = self.polishing.remote_reachable
+            self.polishing.refresh_reachable_async()
         else:
             polish_ready = llm.installed(self.cfg)
         self._settings = SettingsWindow(
@@ -1164,7 +501,7 @@ class App:
             # Testknappen använder appens egen poleringsväg — då provas exakt
             # det som kommer att köras, och Codex-processen som redan är varm
             # återanvänds i stället för att en andra startas.
-            polish_fn=self._polish_with,
+            polish_fn=self.polishing.polish,
         )
 
     def _polish_panel(self, polish_ready: bool) -> dict:
@@ -1203,7 +540,7 @@ class App:
                 # blir sann) – ladda om transcribern så den VRAM-medvetna
                 # kvantiseringen (transcribe._auto_cuda_choice) hinner slå
                 # till nu i stället för att vänta till nästa omstart.
-                self._load_model(self.language, force=True)
+                self.engine.load_model(self.language, force=True)
                 done(f"Polering installerad – markera text och tryck "
                      f"{self.cfg['polish_hotkey'].upper()}.")
             except Exception as e:
@@ -1222,12 +559,12 @@ class App:
 
         def work():
             try:
-                self._polisher = None
+                self.polishing.forget_model()
                 if llm.remove_model(self.cfg):
                     # Poleringen delar inte längre VRAM med Whisper – ladda
                     # om så den VRAM-medvetna kvantiseringen kan släppa
                     # int8_float16 och gå tillbaka till full kvalitet direkt.
-                    self._load_model(self.language, force=True)
+                    self.engine.load_model(self.language, force=True)
                     done("Poleringsmodellen borttagen.")
                 else:
                     done("Tas bort vid nästa start (modellen är laddad just nu).")
@@ -1284,7 +621,7 @@ class App:
         def work():
             try:
                 gpu.download_gpu_libs(progress=progress)
-                self._load_model(self.language, force=True)
+                self.engine.load_model(self.language, force=True)
                 done("GPU-stöd installerat och modellen omladdad.")
             except Exception as e:
                 log.exception("GPU-nedladdningen misslyckades")
@@ -1303,7 +640,7 @@ class App:
         def work():
             try:
                 if gpu.remove_gpu_libs():
-                    self._load_model(self.language, force=True)
+                    self.engine.load_model(self.language, force=True)
                     done("GPU-stöd borttaget – kör på CPU.")
                 else:
                     done("Tas bort vid nästa start (CUDA används just nu).")
@@ -1321,7 +658,7 @@ class App:
         # sessionen föräldralös när tangenten byts ut (inspelningen skulle
         # aldrig gå att stoppa) och det som sagts hittills ginge förlorat.
         if self.hotkey is not None and self.hotkey.force_stop():
-            self._on_stop()
+            self.engine.stop()
         # Autostart är tillstånd (Startup-genvägen), inte config.
         wants_autostart = changes.pop("autostart", None)
         if wants_autostart is not None and wants_autostart != autostart.enabled():
@@ -1403,19 +740,15 @@ class App:
         # trots att Ollama svarar; först nästa diktering hann annars uppdatera
         # cachen. Sker i bakgrunden (2 s HTTP-timeout) så Spara aldrig blockeras.
         if llm.is_remote(self.cfg):
-            threading.Thread(
-                target=self._refresh_remote_reachable, daemon=True
-            ).start()
+            self.polishing.refresh_reachable_async()
         if token_changed and self.cfg["check_updates"] and self.update_release is None:
             update.check_async(
                 __version__,
                 self._on_update_available,
                 token=self.cfg.get("github_token", ""),
             )
-        if changes["polish_backend"] != old["polish_backend"] and self._codex:
-            # Bytt bort från Codex: låt inte processen ligga kvar och ta minne.
-            threading.Thread(target=self._codex.close, daemon=True).start()
-            self._codex = None
+        if changes["polish_backend"] != old["polish_backend"]:
+            self.polishing.close_codex()
         self.sounds.enabled = bool(changes["sounds"])
         for t in self.transcribers.values():
             t.initial_prompt = changes["initial_prompt"]
@@ -1431,17 +764,13 @@ class App:
             # En öppen ström behåller sin mikrofon; öppna om så att valet
             # gäller direkt och inte först vid nästa öppning.
             threading.Thread(target=self.recorder.restart, daemon=True).start()
-        self.language = changes["language"]
+        self.engine.language = changes["language"]
         if model_changed:
             # Byts inte synkront: pågående sessioner behåller sin referens,
             # nya modellen svajpas in under sessionslåset när den är klar.
-            threading.Thread(
-                target=self._load_model, args=(self.language, True), daemon=True
-            ).start()
+            self.engine.load_model_async(self.language, force=True)
         elif self.language not in self.transcribers:
-            threading.Thread(
-                target=self._load_model, args=(self.language,), daemon=True
-            ).start()
+            self.engine.load_model_async(self.language)
         log.info("Inställningar sparade")
         return None
 
@@ -1612,11 +941,11 @@ class App:
                     self.overlay.show(
                         f"Polerar via {llm.remote_label(self.cfg)}", BLUE
                     )
-                elif self._polisher is None:
+                elif not self.polishing.model_loaded:
                     self.overlay.show("Laddar poleringsmodellen…", GRAY)
                 else:
                     self.overlay.show("Polerar", BLUE)
-                result = self._polish_with(self.cfg, text, style, self.language)
+                result = self.polishing.polish(self.cfg, text, style, self.language)
             except Exception:
                 log.exception("Poleringen misslyckades")
                 restore_original_clipboard()
@@ -1627,14 +956,14 @@ class App:
                 return
             # Originalet i historiken innan markeringen ersätts — en enkel
             # ångra-väg (traymenyn: klicka för att kopiera tillbaka det).
-            self._remember(text)
+            self.engine.remember(text)
             inject(
                 result,
                 profile.get("inject_mode", self.cfg["inject_mode"]),
                 self.cfg["restore_clipboard"],
             )
-            self.last_text = result
-            self._remember(result)  # polerat överst
+            self.engine.last_text = result
+            self.engine.remember(result)  # polerat överst
             self._refresh_tray_menu()
             self.overlay.hide()
         finally:
@@ -1653,9 +982,8 @@ class App:
         if self.icon is not None:
             self.icon.stop()
         self._stop_keys()
-        if self._codex is not None:
-            self._codex.close()
-        self.recorder.close()
+        self.polishing.close()
+        self.engine.close()
         self._quit.set()
 
     def _poll_quit(self) -> None:
@@ -1864,21 +1192,16 @@ def main() -> None:
         import time as _time
 
         started = _time.perf_counter()
+        polishing = Polishing(cfg)
         try:
-            app_stub = App.__new__(App)  # bara poleringsvägen behövs
-            app_stub.cfg = cfg
-            app_stub._codex = None
-            app_stub._polisher = None
-            app_stub._polisher_lock = threading.Lock()
-            out = app_stub._polish_with(cfg, sample, llm.resolve_polish_prompt(cfg))
+            out = polishing.polish(cfg, sample, llm.resolve_polish_prompt(cfg))
             print(f"Svar:    {out}")
             print(f"Tid:     {(_time.perf_counter() - started):.1f} s")
         except Exception as e:  # noqa: BLE001
             print(f"Fel:     {codex.friendly_error(e)}")
             sys.exit(1)
         finally:
-            if getattr(app_stub, "_codex", None) is not None:
-                app_stub._codex.close()
+            polishing.close()
         return
     if args.check or args.transcribe:
         lang = args.language or cfg["language"]
