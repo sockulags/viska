@@ -8,7 +8,11 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
 
 **Fas 0 (Viska)**
 - [x] 0.1 Svansen efter tangentsläpp
-- [ ] 0.2 Väntan vid inklistring
+- [x] 0.2 Väntan vid inklistring — nästa inklistring och återställningen väntar bara tills
+  målprogrammet har läst. Gäller inte när en klippbordsövervakare hinner läsa först; på
+  din dator gör fjärrskrivbordsklienten (msrdc.exe) det, och då gäller 0,8 s som förut.
+  Den läser dessutom dikterad text trots privat-märkningen, så diktat följer med till en
+  ansluten fjärrsession.
 - [ ] 0.3a Bluetooth: slå upp den faktiska mikrofonen och välj datorns i stället för ett headset
 - [ ] 0.3b Kortare stängning av mikrofonen och WASAPI
 - [ ] 0.3c Headsetet används fritt när det redan är i ett samtal
