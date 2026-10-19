@@ -29,6 +29,7 @@ UI-kö. Alla färger går via viska.ui: inget får ärva klassiska
 tk-standardfärger (det var så Windows 2000-blandningen uppstod).
 """
 
+import logging
 import os
 import queue
 import threading
@@ -36,9 +37,11 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
-from viska import autostart, codex, focus, llm, metrics, ui
+from viska import autostart, codex, focus, llm, metrics, mics, ui
 from viska.config import CONFIG_PATH, LOG_PATH
 from viska.hotkey import HotkeyError, is_mouse, parse_hotkey
+
+log = logging.getLogger(__name__)
 
 # Livekänsla: (passintervall, tystnadskrav). Kortare = ivrigare inskrivning.
 FEELS = {
@@ -460,6 +463,16 @@ class SettingsWindow:
         )
         ui.Segmented(holder, list(_MIC_CHOICES), self._mic_mode).frame.pack()
 
+        self._avoid_bt = self._var(
+            tk.BooleanVar, value=bool(cfg["mic_avoid_bluetooth"])
+        )
+        holder = self._row(
+            parent,
+            "Använd inte headsetets mikrofon",
+            hint="Bluetooth-headset byter till samtalsläge när mikrofonen används",
+        )
+        ttk.Checkbutton(holder, variable=self._avoid_bt).pack()
+
         reverse_live = {v: k for k, v in _LIVE_CHOICES.items()}
         self._live = self._var(
             tk.StringVar, value=reverse_live.get(cfg["live"], reverse_live["auto"])
@@ -521,14 +534,15 @@ class SettingsWindow:
         """Vilken mikrofon Windows skulle välja just nu. Ren avläsning i en
         egen tråd — PortAudio kan ta hundratals millisekunder på sig."""
 
+        cfg_device = self._cfg["input_device"]
+        avoid = self._avoid_bt.get()
+
         def work():
             try:
-                import sounddevice as sd
-
-                default = sd.query_devices(kind="input")
-                text = f"Standardmikrofon: {default['name']}"
-            except Exception as e:  # noqa: BLE001
-                text = f"Ingen mikrofon hittades ({e})"
+                text = mics.resolve(cfg_device, avoid).describe()
+            except Exception:
+                log.exception("Kunde inte läsa mikrofonerna")
+                text = "Ingen mikrofon hittades."
             self._remote_queue.put(("mic", "text", text))
 
         self._mic_info.config(text="Läser enheter…")
@@ -1688,6 +1702,7 @@ class SettingsWindow:
             "restore_clipboard": self._restore.get(),
             "append_space": self._append.get(),
             "mic_mode": _MIC_CHOICES[self._mic_mode.get()],
+            "mic_avoid_bluetooth": self._avoid_bt.get(),
             "polish_backend": _ENGINE_CHOICES.get(self._engine.get(), "builtin"),
             "polish_codex_model": self._codex_model.get().strip() or "gpt-5.6-luna",
             "polish_codex_effort": (

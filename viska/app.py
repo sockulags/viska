@@ -14,7 +14,9 @@ from pathlib import Path
 
 import numpy as np
 
-from viska import __version__, autostart, codex, commands, gpu, llm, metrics, update
+from viska import (
+    __version__, autostart, codex, commands, gpu, llm, metrics, mics, update,
+)
 from viska.audio import SAMPLE_RATE, Recorder
 from viska.config import (
     CONFIG_DIR,
@@ -109,8 +111,9 @@ class App:
         self.cfg = cfg
         self.root = root
         self.sounds = Sounds(cfg["sounds"])
+        self._mic_choice = None
         self.recorder = Recorder(
-            cfg["input_device"],
+            self._choose_mic,
             cfg["mic_mode"],
             cfg["preroll_s"],
             cfg["mic_idle_close_s"],
@@ -623,6 +626,16 @@ class App:
             elif self._live_enabled(transcriber):
                 self._start_live_worker(transcriber, lang, preview_only=False)
             return True
+
+    def _choose_mic(self):
+        """Anropas av Recorder varje gång strömmen öppnas."""
+        choice = mics.resolve(
+            self.cfg["input_device"], self.cfg["mic_avoid_bluetooth"]
+        )
+        if choice != self._mic_choice:
+            log.info("Mikrofon: %s", choice.describe())
+            self._mic_choice = choice
+        return choice.device
 
     def _start_live_worker(
         self, transcriber: Transcriber, lang: str, preview_only: bool
@@ -1367,6 +1380,10 @@ class App:
                 args=(changes["mic_mode"], changes["mic_idle_close_s"]),
                 daemon=True,
             ).start()
+        if changes["mic_avoid_bluetooth"] != old["mic_avoid_bluetooth"]:
+            # En öppen ström behåller sin mikrofon; öppna om så att valet
+            # gäller direkt och inte först vid nästa öppning.
+            threading.Thread(target=self.recorder.restart, daemon=True).start()
         self.language = changes["language"]
         if model_changed:
             # Byts inte synkront: pågående sessioner behåller sin referens,
@@ -1763,6 +1780,11 @@ def main() -> None:
         import sounddevice as sd
 
         print(sd.query_devices())
+        for ep in mics.capture_endpoints():
+            if ep.bluetooth:
+                print(f"Bluetooth-headset: {ep.device}")
+        cfg = load()
+        print(mics.resolve(cfg["input_device"], cfg["mic_avoid_bluetooth"]).describe())
         return
     if args.install_autostart:
         print(f"Autostart installerad: {autostart.install()}")

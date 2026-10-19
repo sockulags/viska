@@ -13,7 +13,10 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   din dator gör fjärrskrivbordsklienten (msrdc.exe) det, och då gäller 0,8 s som förut.
   Den läser dessutom dikterad text trots privat-märkningen, så diktat följer med till en
   ansluten fjärrsession.
-- [ ] 0.3a Bluetooth: slå upp den faktiska mikrofonen och välj datorns i stället för ett headset
+- [x] 0.3a Bluetooth: slå upp den faktiska mikrofonen och välj datorns i stället för ett headset
+  — valet görs vid varje öppning och öppnar via WASAPI. Inte verifierat med ett anslutet
+  headset. Ett headset via USB-dongel (din Jabra Link 390) syns som USB för Windows och
+  kan inte kännas igen här.
 - [ ] 0.3b Kortare stängning av mikrofonen och WASAPI
 - [ ] 0.3c Headsetet används fritt när det redan är i ett samtal
 - [ ] 0.4 Grafikminne vid modellbyte

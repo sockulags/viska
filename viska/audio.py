@@ -14,6 +14,9 @@ mikrofonikonen i aktivitetsfältet så länge den är det:
 
 Ljudet lämnar aldrig processen.
 
+Vilken mikrofon som öppnas avgörs vid varje öppning (se mics.py), så att
+ett Bluetooth-headset som blivit Windows standard inte används i onödan.
+
 PortAudio fryser enhetslistan vid init och följer inte Windows byte av
 standardmikrofon. En vakthund upptäcker att callbacken tystnat (enheten
 försvann) och bygger då om PortAudio; traymenyn kan också trigga det
@@ -53,6 +56,7 @@ class Recorder:
         idle_close_s: float = 20.0,
         tail_s: float = TAIL_S,
     ):
+        # Ett fast val, eller en funktion som väljer vid varje öppning.
         self._device = input_device
         self._mode = mode if mode in MODES else ON_DEMAND
         self._idle_close_s = max(0.0, float(idle_close_s))
@@ -245,12 +249,13 @@ class Recorder:
         self._open_stream()
 
     def _open_stream(self) -> None:
+        device = self._device() if callable(self._device) else self._device
         kwargs = dict(
             samplerate=SAMPLE_RATE,
             channels=1,
             dtype="float32",
             blocksize=BLOCK,
-            device=self._device,
+            device=device,
             callback=self._callback,
         )
         try:
