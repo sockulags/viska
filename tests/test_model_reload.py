@@ -1,10 +1,10 @@
 """Modellbyte: den gamla Whisper-modellen ska vara släppt innan den nya
 laddas, så att grafikkortet aldrig behöver hålla båda samtidigt."""
 
-import threading
+import copy
 import weakref
 
-from viska import app as app_module
+from viska import config, engine
 
 
 class FakeTranscriber:
@@ -19,57 +19,62 @@ class FakeTranscriber:
         self.initial_prompt = ""
 
 
-class _Quiet:
-    def show(self, *_a, **_k):
-        pass
+class Recorded(engine.Feedback):
+    def __init__(self):
+        self.events = []
+
+    def status(self, text):
+        self.events.append(("status", text))
+
+    def model_ready(self, device):
+        self.events.append(("ready", device))
 
 
-class _Recorder:
-    recording = False
-
-
-def _app(monkeypatch):
-    monkeypatch.setattr(app_module, "Transcriber", FakeTranscriber)
-    monkeypatch.setattr(app_module.llm, "polish_shares_gpu", lambda cfg: False)
-    a = app_module.App.__new__(app_module.App)
-    a.cfg = {
-        "model": "large",
-        "model_en": "en",
-        "device": "auto",
-        "beam_size": 5,
-        "compute_type": "auto",
-        "initial_prompt": "",
-        "hotkey": "f9",
-    }
-    a.transcribers = {}
-    a._loading_lock = threading.Lock()
-    a._loading_langs = set()
-    a._session_lock = threading.Lock()
-    a.overlay = _Quiet()
-    a.recorder = _Recorder()
-    a.status = ""
-    a._refresh_tray_menu = lambda: None
-    return a
+def _engine(monkeypatch):
+    monkeypatch.setattr(engine, "Transcriber", FakeTranscriber)
+    monkeypatch.setattr(engine.llm, "polish_shares_gpu", lambda cfg: False)
+    cfg = copy.deepcopy(config.DEFAULTS)
+    cfg.update(model="large", model_en="en", history_persist=False)
+    feedback = Recorded()
+    return engine.DictationEngine(cfg, feedback), feedback
 
 
 def test_gamla_modellen_slapps_fore_den_nya(monkeypatch):
     FakeTranscriber.alive_at_construction.clear()
-    a = _app(monkeypatch)
-    a._load_model("sv")
-    a._load_model("en")
+    e, _ = _engine(monkeypatch)
+    e.load_model("sv")
+    e.load_model("en")
     assert len(FakeTranscriber.alive) == 2
 
-    a.cfg["model"] = "medium"
-    a._load_model("sv", force=True)
+    e.cfg["model"] = "medium"
+    e.load_model("sv", force=True)
 
     # Den tredje modellen skapades när inga andra levde längre.
     assert FakeTranscriber.alive_at_construction[-1] == 0
-    assert list(a.transcribers) == ["sv"]
-    assert a.transcribers["sv"].model_name == "medium"
+    assert list(e.transcribers) == ["sv"]
+    assert e.transcribers["sv"].model_name == "medium"
 
 
 def test_vanlig_laddning_behaller_andra_spraket(monkeypatch):
-    a = _app(monkeypatch)
-    a._load_model("sv")
-    a._load_model("en")
-    assert set(a.transcribers) == {"sv", "en"}
+    e, _ = _engine(monkeypatch)
+    e.load_model("sv")
+    e.load_model("en")
+    assert set(e.transcribers) == {"sv", "en"}
+
+
+def test_motorn_berattar_att_den_ar_redo(monkeypatch):
+    e, feedback = _engine(monkeypatch)
+    e.load_model("sv")
+    assert ("ready", "cuda") in feedback.events
+    assert ("status", "redo – large (cuda)") in feedback.events
+
+
+def test_motorn_klarar_sig_utan_mottagare(monkeypatch):
+    monkeypatch.setattr(engine, "Transcriber", FakeTranscriber)
+    monkeypatch.setattr(engine.llm, "polish_shares_gpu", lambda cfg: False)
+    cfg = copy.deepcopy(config.DEFAULTS)
+    cfg["history_persist"] = False
+    e = engine.DictationEngine(cfg)  # ingen Feedback, ingen polering
+    e.load_model("sv")
+    assert "sv" in e.transcribers
+    assert e.polishing is None

@@ -31,7 +31,9 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
 - [ ] Mät Bluetooth-bytet på ditt headset — *väntar på dig*
 
 **Fas 1 (Viska)**
-- [ ] 1.1 Dela `app.py` i session, motor och gränssnitt (Tk fortsätter fungera ovanpå)
+- [x] 1.1 Dela `app.py` i session, motor och gränssnitt (Tk fortsätter fungera ovanpå) —
+  `engine.py` (diktering, modeller, mikrofon, historik), `polishing.py` (dagens
+  poleringsmotorer) och `app.py` (Tk, tray, inställningar, F8, uppdatering).
 - [ ] 1.2 `viska --engine` med JSON över stdin/stdout
 
 **Fas 2 (Referat)**

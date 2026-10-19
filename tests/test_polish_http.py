@@ -152,7 +152,7 @@ def test_etikett_och_modell_foljer_backend():
 
 
 def _guard():
-    from viska.app import InsertionGuard
+    from viska.engine import InsertionGuard
 
     return InsertionGuard()
 
