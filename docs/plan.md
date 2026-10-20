@@ -81,7 +81,29 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   utan den startar Referats GPU-komponent nu large
   ([referat#144](https://github.com/sockulags/referat/pull/144)). CPU-komponenten behåller
   small.
-- [ ] 3.3 Motorn spelar in mötesmikrofonen
+- [x] 3.3 Motorn spelar in mötesmikrofonen — i mindre form: Referat behåller sin
+  inspelning men spelar in med den mikrofon motorn skulle välja (`current_mic`), när
+  mötesmikrofonen står på systemstandard och dikteringen körs
+  ([referat#145](https://github.com/sockulags/referat/pull/145)). Samma mikrofonval och
+  Bluetooth-hantering, utan att flytta mötesinspelningen.
+
+**Väntar på dig**
+- Mät Bluetooth-bytet och utfyllnadsorden (se fas 0).
+- Releasen av båda programmen. Före den: flytta `scripts/viska-engine.ref` i Referat till
+  Viskas senaste commit, höj Referats version, och låt releasebygget bygga
+  `dictation-cpu`/`dictation-gpu`. Viska 0.9.0 är förberedd.
+- Beslutet om KB-Whisper-stil för diktering (`standard` eller `subtitle`), när mätningen
+  av utfyllnadsord finns.
+
+**Inte gjort, utanför checklistan**
+- Fråga en gång när ett Bluetooth-headset ansluts (Bluetooth-avsnittet, punkt 2). I dag
+  syns valet och varningen bara i inställningarna.
+- Lyssna på enhetsändringar (punkt 7). Valet görs om vid varje öppning av mikrofonen, men
+  PortAudio ser en nyss ansluten enhet först efter en omstart av ljudet.
+- En knapp som fångar tangenten i Referats inställningar; i dag skrivs den in som text.
+- Regler per program (Viskas app-profiler) i Referat.
+- Statusrutan i Referat visar "Polerar …" men har inga knappar för "infoga råtext" och
+  "avbryt"; motorn har kommandona.
 
 ## Riktning
 
