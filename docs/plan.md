@@ -52,7 +52,9 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
 - [x] 2.4 Historik — sidan Diktat med en veckas diktat, kopiera, ta bort och rätta till
   ordlistan ([referat#138](https://github.com/sockulags/referat/pull/138)). Viska skickar
   programmets namn med varje diktat.
-- [ ] 2.5 Introduktion
+- [x] 2.5 Introduktion — frivilligt sista steg "Vill du också kunna diktera?" med
+  installation, påslag och en ruta att prova i
+  ([referat#140](https://github.com/sockulags/referat/pull/140)).
 - [x] 2.6 Ordlistan till motorn — varianter blir ersättningar, rätta stavningar blir
   Whispers ledtråd (högst 40), skickas igen när ordlistan ändras
   ([referat#139](https://github.com/sockulags/referat/pull/139)). Motorn matchar
