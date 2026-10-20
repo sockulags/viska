@@ -166,3 +166,15 @@ def test_tystnad_fran_headsetet_ger_tidsgrans():
     assert not rec.wait_for_audio(0.3)
     assert time.monotonic() - started < 0.6
     rec.stop()
+
+
+def test_ny_mikrofon_laser_in_enheterna_pa_nytt(monkeypatch):
+    signatures = iter([("a",), ("a",), ("a", "headset")])
+    monkeypatch.setattr(audio.mics, "endpoint_signature", lambda: next(signatures))
+    resets = []
+    monkeypatch.setattr(audio.Recorder, "_reset_portaudio", staticmethod(lambda: resets.append(1)))
+    rec = audio.Recorder(mode=audio.CLOSED, tail_s=0)
+    for _ in range(3):
+        rec.start()
+        rec.stop()
+    assert resets == [1]  # bara när headsetet dök upp
