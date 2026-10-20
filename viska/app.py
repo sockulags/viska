@@ -42,6 +42,14 @@ from viska.transcribe import Transcriber
 
 log = logging.getLogger("viska")
 
+# Viska utvecklas vidare som dikteringen i Referat, som också spelar in och
+# sammanfattar möten. Den fristående appen får inga nya funktioner.
+REFERAT_URL = "https://github.com/sockulags/referat/releases/latest"
+REFERAT_NOTICE = (
+    "Dikteringen finns nu i Referat, med samma motor och dina inställningar. "
+    "Viska fungerar som förut men får inga nya funktioner."
+)
+
 # Poleringstangenten: två tryck inom det här fönstret öppnar tonvalsmenyn i
 # stället för att polera direkt. Ett enkeltryck fördröjs så länge (och bara så
 # länge) så trycken kan skiljas åt — ingen annan extra fördröjning.
@@ -185,6 +193,11 @@ class App:
         for notice in self._bind_keys(cfg, keep_on_error=True):
             log.warning("Tangenten kunde inte registreras: %s", notice)
             self._startup_notices.append(notice)
+        if not cfg["referat_notice_shown"]:
+            # En gång: Viska utvecklas vidare som dikteringen i Referat.
+            self._startup_notices.append(REFERAT_NOTICE)
+            cfg["referat_notice_shown"] = True
+            save(cfg)
         self.engine.load_model_async(self.language)
         if cfg["check_updates"]:
             update.check_async(
@@ -431,6 +444,12 @@ class App:
             auto_hide_ms=5000,
         )
         self._open_releases_page()
+
+    def open_referat_page(self) -> None:
+        try:
+            os.startfile(REFERAT_URL)
+        except Exception:
+            log.exception("Kunde inte öppna Referats sida")
 
     def _open_releases_page(self) -> None:
         try:
@@ -1039,6 +1058,11 @@ def make_tray(app: App):
             "Inställningar…", lambda icon, item: app.request_settings()
         ),
         pystray.MenuItem("Byt till ny standardmikrofon", restart_audio),
+        pystray.Menu.SEPARATOR,
+        pystray.MenuItem(
+            "Dikteringen finns nu i Referat…",
+            lambda icon, item: app.open_referat_page(),
+        ),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Avsluta", lambda icon, item: app.quit()),
     )

@@ -206,6 +206,8 @@ DEFAULTS = {
     # vid start.
     "history_size": 20,
     "history_persist": False,
+    # Satt när Viska en gång har berättat att dikteringen nu finns i Referat.
+    "referat_notice_shown": False,
     # Kolla efter ny version mot GitHub releases vid start (endast en
     # versionssiffra hämtas; ingen data skickas).
     "check_updates": True,

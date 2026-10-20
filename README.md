@@ -19,6 +19,11 @@
   <a href="#how-it-works">How it works</a>
 </p>
 
+> **Dictation now lives in [Referat](https://github.com/sockulags/referat).** Referat runs
+> Viska's dictation engine, adds a settings page, a history and a shared glossary, and
+> also records and summarizes meetings. It moves your Viska settings and replacement rules
+> over on first start. Viska keeps working as before but gets no new features.
+
 Hold a key, speak, and Viska writes the result at the cursor in almost any Windows app.
 It can also rewrite selected text—or polish an entire dictation before inserting it—using
 a small language model that runs on your own computer.
