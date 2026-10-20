@@ -67,7 +67,9 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   livetext och ljud, och ersättningsregler och ordförråd som ordlistetermer
   ([referat#142](https://github.com/sockulags/referat/pull/142)). App-profilerna följer
   inte med, eftersom Referat inte har regler per program än.
-- [ ] 2.9 Sista fristående Viska-versionen
+- [x] 2.9 Sista fristående Viska-versionen — 0.9.0 säger en gång att dikteringen finns i
+  Referat och har en rad i trayn dit; README och release notes uppdaterade. Ingen release
+  gjord: den görs tillsammans med Referats när allt är klart.
 
 **Fas 3 (Referat)**
 - [ ] 3.1 En motor för möten och diktering
