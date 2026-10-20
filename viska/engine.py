@@ -793,7 +793,7 @@ class DictationEngine:
         Returnerar (text, orsak). Orsaken driver statusraden: en råtext som
         skrivs in för att modellen teg ska säga just det, inte se ut som ett
         normalt resultat."""
-        if not llm.installed(self.cfg):
+        if not self.polishing.available():
             return None, "otillgänglig"
         result: dict[str, str] = {}
         # Sätts från GUI-tråden när en knapp trycks; läses här.

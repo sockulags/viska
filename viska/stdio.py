@@ -154,6 +154,63 @@ class JsonFeedback(Feedback):
         return True
 
 
+class HostPolishing:
+    """Polering som värden gör, med sin egen AI-tjänst.
+
+    Motorn har flödet: statusrutan med "infoga råtext" och "avbryt",
+    tidsgränsen och vakten mot dubbla inskrivningar. Själva omskrivningen
+    skickas till värden som en polish_request-händelse, och värden svarar
+    med kommandot polished eller polish_failed. Ett svar som kommer efter
+    motorns tidsgräns kastas, och råtexten har då redan skrivits in.
+    """
+
+    def __init__(self, out: JsonOut, timeout_s: float = 30.0):
+        self.out = out
+        self.timeout_s = timeout_s
+        self._lock = threading.Lock()
+        self._next_id = 0
+        self._waiting: dict[int, dict] = {}
+
+    # Värden lovar att svara när den slår på flow; inget att kontrollera.
+    def available(self) -> bool:
+        return True
+
+    def warmup(self) -> None:
+        pass
+
+    def refresh_reachable_async(self) -> None:
+        pass
+
+    def polish(self, cfg: dict, text: str, style: str, lang: str = "sv") -> str:
+        with self._lock:
+            self._next_id += 1
+            request = self._next_id
+            slot = {"done": threading.Event(), "text": None, "error": None}
+            self._waiting[request] = slot
+        try:
+            self.out.send(
+                "polish_request", request=request, text=text, style=style, language=lang
+            )
+            if not slot["done"].wait(self.timeout_s):
+                raise TimeoutError("värden svarade inte på poleringen")
+            if slot["error"]:
+                raise RuntimeError(slot["error"])
+            return slot["text"] or text
+        finally:
+            with self._lock:
+                self._waiting.pop(request, None)
+
+    def answer(self, request, text: str | None = None, error: str | None = None) -> bool:
+        """Värdens svar. False om ingen väntar på just den förfrågan längre."""
+        with self._lock:
+            slot = self._waiting.get(request)
+        if slot is None:
+            return False
+        slot["text"], slot["error"] = text, error
+        slot["done"].set()
+        return True
+
+
 class EngineHost:
     """Tar emot kommandon och kör motorn. Separat från stdin-loopen så att
     testerna kan mata kommandon direkt."""
@@ -165,7 +222,8 @@ class EngineHost:
         self.out = out
         self.cfg = cfg if cfg is not None else _engine_defaults()
         self.feedback = JsonFeedback(out, lambda: self.engine)
-        self.engine = DictationEngine(self.cfg, self.feedback)
+        self.polishing = HostPolishing(out)
+        self.engine = DictationEngine(self.cfg, self.feedback, self.polishing)
         self.engine.take_over_key = self._take_over_key
         self.hotkey = None
         self.configured = False
@@ -264,6 +322,18 @@ class EngineHost:
     def cmd_insert_raw(self, _message: dict) -> dict:
         """Under en polering: skriv in råtexten nu i stället för att vänta."""
         return {"inserted": self.feedback.take_action("insert_raw")}
+
+    def cmd_polished(self, message: dict) -> dict:
+        """Svar på en polish_request: den omskrivna texten."""
+        text = message.get("text")
+        if not isinstance(text, str):
+            raise ValueError("text saknas")
+        return {"accepted": self.polishing.answer(message.get("request"), text=text)}
+
+    def cmd_polish_failed(self, message: dict) -> dict:
+        """Svar på en polish_request: det gick inte. Råtexten skrivs in."""
+        error = str(message.get("message") or "poleringen misslyckades")
+        return {"accepted": self.polishing.answer(message.get("request"), error=error)}
 
     def cmd_history(self, _message: dict) -> dict:
         return {"items": list(self.engine.history), "last": self.engine.last_text}
