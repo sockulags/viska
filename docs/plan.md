@@ -59,8 +59,10 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   Whispers ledtråd (högst 40), skickas igen när ordlistan ändras
   ([referat#139](https://github.com/sockulags/referat/pull/139)). Motorn matchar
   varianten exakt; mötesordlistans tolerans för delade ord och bindestreck saknas där.
-- [ ] 2.7 Polering som tillval — Viska-delen klar: motorläget ber värden om polering
-  (`polish_request`, svar med `polished`/`polish_failed`). Kvar: Referat-sidan.
+- [x] 2.7 Polering som tillval — motorläget ber värden om polering (`polish_request`),
+  och Referat skriver om med sammanfattningens AI-tjänst och en prompt som behandlar
+  diktatet som data ([referat#141](https://github.com/sockulags/referat/pull/141)).
+  Med Codex som tjänst hinner omskrivningen troligen inte inom motorns tio sekunder.
 - [ ] 2.8 Flytt från Viska
 - [ ] 2.9 Sista fristående Viska-versionen
 
