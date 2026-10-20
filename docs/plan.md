@@ -72,10 +72,11 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   gjord: den görs tillsammans med Referats när allt är klart.
 
 **Fas 3 (Referat)**
-- [ ] 3.1 En motor för möten och diktering — Viska-delen klar: `serve_transcription`
-  ger mötesljud motorns varma modell, i bitar med lägre prioritet än diktering (sju
-  sekunder tal skrevs ut på 0,9 s med large på CUDA). Kvar: Referat använder den när
-  dikteringen körs.
+- [x] 3.1 En motor för möten och diktering — `serve_transcription` ger mötesljud motorns
+  varma modell, i bitar med lägre prioritet än diktering, och Referats inbyggda
+  transkribering använder den när dikteringen körs
+  ([referat#143](https://github.com/sockulags/referat/pull/143)). Utan diktering startar
+  Referat sin egen komponent som förut.
 - [ ] 3.2 KB-Whisper large för möten
 - [ ] 3.3 Motorn spelar in mötesmikrofonen
 
