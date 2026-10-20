@@ -255,3 +255,15 @@ def test_aktuell_mikrofon_foljer_motorns_regler(host, monkeypatch):
         "bluetooth": False, "avoided": "Jabra Evolve3 85", "in_call": False,
     }
     assert seen["args"] == (None, True)
+
+
+def test_utan_tangent_laddas_modellen_bara_for_moten(host):
+    # Referat startar motorn för mötesljud även när dikteringen är av.
+    host.handle({"cmd": "configure", "config": {"hotkey": ""}})
+    assert host.keys == []
+    assert host.loads == [("sv", False)]
+    host.handle({"cmd": "configure", "config": {"hotkey": "f9"}})
+    assert [k.hotkey for k in host.keys] == ["f9"]
+    host.handle({"cmd": "configure", "config": {"hotkey": ""}})
+    assert host.keys[0].stopped
+    assert len(host.keys) == 1

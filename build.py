@@ -45,11 +45,18 @@ def make_icon() -> Path:
     return ico
 
 
-def copy_nvidia_dlls(dist: Path) -> None:
-    # Speglar körningens uppslag (nvidia/*/bin): cuBLAS/cuDNN laddar i sin
-    # tur cuda_nvrtc dynamiskt, så ALLA installerade nvidia-bin måste med.
+# Det CTranslate2 behöver på Windows: cuBLAS (laddas vid namn) och CUDA-
+# runtime. Windows-bygget av CTranslate2 4.8 använder inte cuDNN, som ensamt
+# är nästan 900 MB; Referats transkriberingskomponent har aldrig haft den.
+ENGINE_NVIDIA_LIBS = ("cublas", "cuda_runtime")
+
+
+def copy_nvidia_dlls(dist: Path, only: tuple[str, ...] | None = None) -> None:
+    # Speglar körningens uppslag (nvidia/*/bin).
     nvidia = Path(sysconfig.get_path("purelib")) / "nvidia"
     bin_dirs = sorted(nvidia.glob("*/bin")) if nvidia.is_dir() else []
+    if only is not None:
+        bin_dirs = [d for d in bin_dirs if d.parent.name in only]
     if not bin_dirs:
         sys.exit(
             f"Hittar inga DLL:er under {nvidia} – "
@@ -142,7 +149,7 @@ def build_engine(gpu: bool) -> None:
     )
     dist = ROOT / "dist" / "viska-engine"
     if gpu:
-        copy_nvidia_dlls(dist)
+        copy_nvidia_dlls(dist, only=ENGINE_NVIDIA_LIBS)
     suffix = "-gpu" if gpu else ""
     zip_path = shutil.make_archive(
         str(ROOT / "dist" / f"viska-engine-{__version__}{suffix}"), "zip",

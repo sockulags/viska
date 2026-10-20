@@ -284,6 +284,9 @@ class EngineHost:
                 self.engine.stop()
             self.hotkey.stop()
             self.hotkey = None
+        if not self.cfg["hotkey"]:
+            # Ingen tangent: värden använder motorn bara för mötesljud.
+            return
         try:
             self.hotkey = create_push_to_talk(
                 self.cfg["hotkey"],
