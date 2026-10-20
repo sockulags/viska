@@ -294,7 +294,32 @@ class Recorder:
             log.info("Mikrofonerna har ändrats – läser in dem på nytt")
             self._reset_portaudio()
         self._endpoints = endpoints
-        device = self._device() if callable(self._device) else self._device
+        try:
+            stream = self._start_stream(self._current_device())
+        except (sd.PortAudioError, ValueError):
+            # PortAudio läser in enheterna bara när den startar; en lista
+            # från före en ändring ger fel enhet eller ingen alls.
+            log.warning(
+                "Mikrofonen gick inte att öppna – läser in mikrofonerna och "
+                "försöker igen",
+                exc_info=True,
+            )
+            self._reset_portaudio()
+            self._endpoints = mics.endpoint_signature()
+            stream = self._start_stream(self._current_device())
+        self._stream = stream
+        self._last_frame_t = time.monotonic()
+
+    def _current_device(self):
+        return self._device() if callable(self._device) else self._device
+
+    def _start_stream(self, device):
+        """Öppnar och startar strömmen. En WASAPI-mikrofon i delat läge tar
+        bara sin egen samplingsfrekvens, oftast 48 kHz; med auto_convert
+        gör Windows om ljudet till 16 kHz. Felet kommer ibland först när
+        strömmen startar (AUDCLNT_E_UNSUPPORTED_FORMAT), så båda stegen
+        prövas. PortAudios standardenhet är inte WASAPI och tar inte
+        inställningen; den klarar 16 kHz själv."""
         kwargs = dict(
             samplerate=SAMPLE_RATE,
             channels=1,
@@ -303,16 +328,21 @@ class Recorder:
             device=device,
             callback=self._callback,
         )
-        try:
-            stream = sd.InputStream(**kwargs)
-        except sd.PortAudioError:
-            # WASAPI shared mode kan neka 16 kHz utan auto-konvertering.
-            stream = sd.InputStream(
-                **kwargs, extra_settings=sd.WasapiSettings(auto_convert=True)
-            )
-        stream.start()
-        self._stream = stream
-        self._last_frame_t = time.monotonic()
+        error = None
+        for extra in ({"extra_settings": sd.WasapiSettings(auto_convert=True)}, {}):
+            stream = None
+            try:
+                stream = sd.InputStream(**kwargs, **extra)
+                stream.start()
+                return stream
+            except (sd.PortAudioError, ValueError) as exc:
+                error = exc
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except Exception:
+                        pass
+        raise error
 
     def _close_stream(self) -> None:
         stream, self._stream = self._stream, None

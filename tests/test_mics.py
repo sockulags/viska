@@ -110,3 +110,50 @@ def test_samtal_paverkar_inte_en_vanlig_mikrofon():
 
 def test_registret_over_mikrofonanvandare_gar_att_lasa():
     assert isinstance(mics.mic_users(), list)
+
+
+# Namnen från loggen på en Dell där varje val misslyckades: samma mikrofon
+# finns under MME, DirectSound, WASAPI och WDM-KS, så namnet ensamt pekade
+# ut fyra enheter.
+DELL_INPUTS = [
+    (17, "Microphone Array (2- Realtek(R) Audio)"),
+    (18, "Headset (Jabra Evolve3 85)"),
+]
+
+
+def test_sparat_namn_blir_wasapi_index():
+    assert mics.find_input("Headset (Jabra Evolve3 85)", DELL_INPUTS) == DELL_INPUTS[1]
+    assert mics.find_input("microphone array (2- realtek(r) audio)", DELL_INPUTS) == (
+        DELL_INPUTS[0]
+    )
+
+
+def test_avkortat_eller_forlangt_namn_hittas():
+    # MME kortar till 31 tecken; Chromium lägger till USB-id.
+    assert mics.find_input("Microphone Array (2- Realtek(R)", DELL_INPUTS)[0] == 17
+    assert mics.find_input("Headset (Jabra Evolve3 85) (0b0e:24d4)", DELL_INPUTS)[0] == 18
+
+
+def test_okant_namn_hittas_inte():
+    assert mics.find_input("Mikrofon (USB-dongel)", DELL_INPUTS) is None
+    assert mics.find_input("  ", DELL_INPUTS) is None
+
+
+def _fake_system(monkeypatch, inputs, default):
+    monkeypatch.setattr(mics, "_wasapi_inputs", lambda: (inputs, default))
+    monkeypatch.setattr(mics, "capture_endpoints", lambda: ENDPOINTS)
+    monkeypatch.setattr(mics, "in_call", lambda users=None: False)
+
+
+def test_valt_namn_oppnas_med_index(monkeypatch):
+    _fake_system(monkeypatch, DELL_INPUTS, 17)
+    choice = mics.resolve("Headset (Jabra Evolve3 85)")
+    assert choice.device == 18
+    assert choice.name == "Headset (Jabra Evolve3 85)"
+
+
+def test_vald_mikrofon_som_saknas_ger_automatiskt_val(monkeypatch):
+    _fake_system(monkeypatch, [HEADSET, BUILT_IN], HEADSET[0])
+    choice = mics.resolve("Headset (JBL LIVE770NC Hands-Free)")
+    assert choice.device == BUILT_IN[0]
+    assert choice.avoided == "Jabra Evolve3 85 Hands-Free"

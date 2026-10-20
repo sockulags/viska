@@ -178,3 +178,65 @@ def test_ny_mikrofon_laser_in_enheterna_pa_nytt(monkeypatch):
         rec.start()
         rec.stop()
     assert resets == [1]  # bara när headsetet dök upp
+
+
+def test_wasapi_far_gora_om_ljudet_till_16_khz(monkeypatch):
+    # AUDCLNT_E_UNSUPPORTED_FORMAT kommer först när strömmen startar.
+    opened = []
+
+    class PickyStream(FakeStream):
+        def __init__(self, **kwargs):
+            opened.append("extra_settings" in kwargs)
+            self._auto = "extra_settings" in kwargs
+            super().__init__(**kwargs)
+
+        def start(self):
+            if not self._auto:
+                raise audio.sd.PortAudioError("AUDCLNT_E_UNSUPPORTED_FORMAT")
+            super().start()
+
+    monkeypatch.setattr(audio.sd, "InputStream", PickyStream)
+    rec = audio.Recorder(mode=audio.CLOSED, tail_s=0)
+    rec.start()
+    rec.stop()
+    assert opened == [True]
+
+
+def test_standardenheten_oppnas_utan_wasapi_installning(monkeypatch):
+    opened = []
+
+    class MmeStream(FakeStream):
+        def __init__(self, **kwargs):
+            opened.append("extra_settings" in kwargs)
+            if "extra_settings" in kwargs:
+                raise audio.sd.PortAudioError("Incompatible host API specific stream info")
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(audio.sd, "InputStream", MmeStream)
+    rec = audio.Recorder(mode=audio.CLOSED, tail_s=0)
+    rec.start()
+    rec.stop()
+    assert opened == [True, False]
+
+
+def test_misslyckad_oppning_laser_in_enheterna_och_forsoker_igen(monkeypatch):
+    resets = []
+    monkeypatch.setattr(
+        audio.Recorder, "_reset_portaudio", staticmethod(lambda: resets.append(1))
+    )
+    devices = iter([7, 9])
+    tried = []
+
+    class StaleStream(FakeStream):
+        def __init__(self, *, device=None, **kwargs):
+            tried.append(device)
+            if not resets:
+                raise ValueError("Multiple input devices found")
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(audio.sd, "InputStream", StaleStream)
+    rec = audio.Recorder(input_device=lambda: next(devices), mode=audio.CLOSED, tail_s=0)
+    rec.start()
+    rec.stop()
+    assert resets == [1]
+    assert tried == [7, 7, 9]  # båda försöken med gamla listan, sedan ny enhet

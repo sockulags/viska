@@ -292,16 +292,35 @@ def list_inputs() -> list[dict]:
     ]
 
 
+def find_input(name: str, inputs: list[tuple[int, str]]) -> tuple[int, str] | None:
+    """Ett sparat mikrofonnamn bland WASAPI-ingångarna. Samma mikrofon finns
+    under flera värd-API:er med samma namn, så namnet ensamt räcker inte för
+    PortAudio; här blir det ett index. MME kortar namnet till 31 tecken och
+    Chromium lägger ibland till ett USB-id, så ett namn som börjar det andra
+    räknas också."""
+    wanted = name.strip().casefold()
+    if not wanted:
+        return None
+    for index, candidate in inputs:
+        if candidate.strip().casefold() == wanted:
+            return index, candidate
+    for index, candidate in inputs:
+        have = candidate.strip().casefold()
+        if have.startswith(wanted) or wanted.startswith(have):
+            return index, candidate
+    return None
+
+
 def resolve(input_device, avoid_bluetooth: bool = True) -> Choice:
     """Mikrofonen att öppna nu. input_device är användarens uttryckliga val
-    (namn eller index) och respekteras alltid; None betyder "Windows
-    standard, men inte ett Bluetooth-headset om det går att undvika"."""
+    (namn eller index) och respekteras när mikrofonen finns; None, eller en
+    mikrofon som inte är ansluten, betyder "Windows standard, men inte ett
+    Bluetooth-headset om det går att undvika"."""
     import sounddevice as sd
 
-    if input_device not in (None, ""):
+    if isinstance(input_device, int) and not isinstance(input_device, bool):
         try:
-            info = sd.query_devices(input_device, kind="input")
-            name = info["name"]
+            name = sd.query_devices(input_device, kind="input")["name"]
         except Exception:
             name = str(input_device)
         return Choice(input_device, name, is_bluetooth(name, capture_endpoints()))
@@ -311,9 +330,17 @@ def resolve(input_device, avoid_bluetooth: bool = True) -> Choice:
     except Exception:
         log.exception("Kunde inte läsa WASAPI-enheterna")
         inputs, default = [], None
+    endpoints = capture_endpoints()
+
+    if input_device not in (None, ""):
+        found = find_input(str(input_device), inputs)
+        if found is not None:
+            index, name = found
+            return Choice(index, name, is_bluetooth(name, endpoints))
+        log.warning("Mikrofonen %r finns inte just nu – väljer automatiskt", input_device)
 
     choice = choose(
-        inputs, default, capture_endpoints(), avoid_bluetooth,
+        inputs, default, endpoints, avoid_bluetooth,
         call_active=avoid_bluetooth and in_call(),
     )
     if choice is not None:
