@@ -63,7 +63,10 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   och Referat skriver om med sammanfattningens AI-tjänst och en prompt som behandlar
   diktatet som data ([referat#141](https://github.com/sockulags/referat/pull/141)).
   Med Codex som tjänst hinner omskrivningen troligen inte inom motorns tio sekunder.
-- [ ] 2.8 Flytt från Viska
+- [x] 2.8 Flytt från Viska — vid första start: tangent, språk, mikrofon, Bluetooth-val,
+  livetext och ljud, och ersättningsregler och ordförråd som ordlistetermer
+  ([referat#142](https://github.com/sockulags/referat/pull/142)). App-profilerna följer
+  inte med, eftersom Referat inte har regler per program än.
 - [ ] 2.9 Sista fristående Viska-versionen
 
 **Fas 3 (Referat)**
