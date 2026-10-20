@@ -175,3 +175,66 @@ def test_historiken_talar_om_programmet():
     assert out.last() == {
         "event": "history", "last": "Vi ses på torsdag.", "app": "Microsoft Outlook",
     }
+
+
+# -- Polering hos värden ---------------------------------------------------------
+
+
+def _request(out, timeout=2.0):
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while _time.monotonic() < deadline:
+        for event in out.events:
+            if event["event"] == "polish_request":
+                return event
+        _time.sleep(0.01)
+    raise AssertionError("ingen polish_request skickades")
+
+
+def test_varden_polerar_och_motorn_far_svaret(host):
+    import threading
+
+    from viska.engine import InsertionGuard
+
+    result = {}
+
+    def flow():
+        result["value"] = host.engine._polish_for_flow(
+            "hej anna vi ses", "Skriv som mejl", "sv", InsertionGuard()
+        )
+
+    worker = threading.Thread(target=flow)
+    worker.start()
+    request = _request(host.out)
+    assert request["text"] == "hej anna vi ses"
+    assert request["style"] == "Skriv som mejl"
+    host.handle({"cmd": "polished", "request": request["request"], "text": "Hej Anna, vi ses."})
+    worker.join(5)
+    assert result["value"] == ("Hej Anna, vi ses.", "polerad")
+
+
+def test_misslyckad_polering_ger_ratext(host):
+    import threading
+
+    from viska.engine import InsertionGuard
+
+    result = {}
+    worker = threading.Thread(
+        target=lambda: result.update(
+            value=host.engine._polish_for_flow("hej", "", "sv", InsertionGuard())
+        )
+    )
+    worker.start()
+    request = _request(host.out)
+    host.handle({"cmd": "polish_failed", "request": request["request"], "message": "nere"})
+    worker.join(5)
+    assert result["value"] == (None, "fel")
+
+
+def test_sent_svar_kastas():
+    out = Collect()
+    polishing = stdio.HostPolishing(out, timeout_s=0.1)
+    with pytest.raises(TimeoutError):
+        polishing.polish({}, "hej", "")
+    assert polishing.answer(1, text="för sent") is False

@@ -27,6 +27,8 @@ Varje kommando kan ha ett `id`. Svaret har samma `id`.
 | `insert_raw` | | `inserted`: under en polering, skriv in råtexten nu |
 | `history` | | `items`: senaste dikteringarna, nyast först; `last` |
 | `list_mics` | | `mics`: `[{name, bluetooth, default}]`, där `name` kan sparas som `input_device` |
+| `polished` | `request`, `text` | `accepted`: svar på en `polish_request` med den omskrivna texten |
+| `polish_failed` | `request`, `message` | `accepted`: svar på en `polish_request` som inte gick; råtexten skrivs in |
 | `quit` | | motorn avslutar efter svaret |
 
 Den första `configure` tar dikteringstangenten och laddar modellen. Senare
@@ -61,12 +63,22 @@ rad ger ett fel med `cmd: null`, och motorn fortsätter.
 | `nothing_heard` | | Det fanns ljud men inget tal. |
 | `idle` | | Klart; inget mer att visa. |
 | `failed` | | Utskriften misslyckades. |
-| `polishing` | | Flow-polering pågår (bara med en poleringsmotor). |
+| `polish_request` | `request`, `text`, `style`, `language` | Med `flow: true`: skriv om `text` och svara med `polished` eller `polish_failed` och samma `request`. |
+| `polishing` | | Flow-polering pågår. Värden kan visa "infoga råtext" (`insert_raw`) och "avbryt" (`cancel`). |
 | `inserting` | | Poleringen är avgjord och texten skrivs in. |
 | `flow_done` | `message` | Vad som hamnade i dokumentet efter flow-läget. |
 | `notice` | `message` | Kort upplysning, till exempel "Avbruten". |
 
 Händelserna kan komma från olika trådar men skrivs alltid som hela rader.
+
+## Polering
+
+Med `flow: true` i `configure` skrivs varje diktering om innan den skrivs in, och
+omskrivningen görs av värden. Motorn skickar `polishing` och `polish_request` och
+väntar. Svarar värden inte inom tio sekunder, eller med `polish_failed`, skrivs
+råtexten in. Ett svar som kommer efter det ger `accepted: false` och används inte.
+Under väntan avbryter `cancel` dikteringen helt och `insert_raw` skriver in råtexten
+direkt.
 
 ## Exempel
 
