@@ -77,7 +77,10 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
   transkribering använder den när dikteringen körs
   ([referat#143](https://github.com/sockulags/referat/pull/143)). Utan diktering startar
   Referat sin egen komponent som förut.
-- [ ] 3.2 KB-Whisper large för möten
+- [x] 3.2 KB-Whisper large för möten — med dikteringen igång via motorns modell (3.1), och
+  utan den startar Referats GPU-komponent nu large
+  ([referat#144](https://github.com/sockulags/referat/pull/144)). CPU-komponenten behåller
+  small.
 - [ ] 3.3 Motorn spelar in mötesmikrofonen
 
 ## Riktning
