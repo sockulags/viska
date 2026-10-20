@@ -342,6 +342,19 @@ class EngineHost:
     def cmd_list_mics(self, _message: dict) -> dict:
         return {"mics": mics.list_inputs()}
 
+    def cmd_current_mic(self, _message: dict) -> dict:
+        """Mikrofonen motorn skulle välja just nu, med samma regler som för en
+        diktering: datorns egen i stället för ett Bluetooth-headset, och
+        headsetet under ett samtal. Så kan värden spela in möten med samma
+        mikrofon. name är tomt när ingen mikrofon hittas."""
+        choice = mics.resolve(self.cfg["input_device"], self.cfg["mic_avoid_bluetooth"])
+        return {
+            "name": choice.name,
+            "bluetooth": choice.bluetooth,
+            "avoided": choice.avoided,
+            "in_call": choice.in_call,
+        }
+
     def cmd_serve_transcription(self, message: dict) -> dict:
         """Låt mötesljud skrivas ut med motorns modell: en OpenAI-kompatibel
         /v1/audio/transcriptions på 127.0.0.1. Porten väljs fritt om den
