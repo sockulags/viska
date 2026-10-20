@@ -238,3 +238,20 @@ def test_sent_svar_kastas():
     with pytest.raises(TimeoutError):
         polishing.polish({}, "hej", "")
     assert polishing.answer(1, text="för sent") is False
+
+
+def test_aktuell_mikrofon_foljer_motorns_regler(host, monkeypatch):
+    chosen = mics.Choice(5, "Mikrofonmatris (Realtek)", False, avoided="Jabra Evolve3 85")
+    seen = {}
+
+    def resolve(device, avoid):
+        seen["args"] = (device, avoid)
+        return chosen
+
+    monkeypatch.setattr(stdio.mics, "resolve", resolve)
+    host.handle({"cmd": "current_mic", "id": 4})
+    assert host.out.last() == {
+        "event": "ok", "cmd": "current_mic", "id": 4, "name": "Mikrofonmatris (Realtek)",
+        "bluetooth": False, "avoided": "Jabra Evolve3 85", "in_call": False,
+    }
+    assert seen["args"] == (None, True)

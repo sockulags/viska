@@ -27,6 +27,7 @@ Varje kommando kan ha ett `id`. Svaret har samma `id`.
 | `insert_raw` | | `inserted`: under en polering, skriv in råtexten nu |
 | `history` | | `items`: senaste dikteringarna, nyast först; `last` |
 | `list_mics` | | `mics`: `[{name, bluetooth, default}]`, där `name` kan sparas som `input_device` |
+| `current_mic` | | `name`, `bluetooth`, `avoided`, `in_call`: mikrofonen motorn skulle välja just nu |
 | `polished` | `request`, `text` | `accepted`: svar på en `polish_request` med den omskrivna texten |
 | `polish_failed` | `request`, `message` | `accepted`: svar på en `polish_request` som inte gick; råtexten skrivs in |
 | `serve_transcription` | `port` (valfri) | `port`, `url`: en OpenAI-kompatibel `/v1/audio/transcriptions` på 127.0.0.1 som använder motorns modell |
