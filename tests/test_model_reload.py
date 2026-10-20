@@ -78,3 +78,45 @@ def test_motorn_klarar_sig_utan_mottagare(monkeypatch):
     e.load_model("sv")
     assert "sv" in e.transcribers
     assert e.polishing is None
+
+
+class SlowPolishing:
+    """En polering som aldrig blir klar av sig själv."""
+
+    def __init__(self):
+        import threading
+
+        self.release = threading.Event()
+
+    def available(self):
+        return True
+
+    def polish(self, cfg, text, style, lang):
+        self.release.wait(5)
+        return "polerad"
+
+
+def test_tangenten_under_omskrivningen_skriver_in_ratexten(monkeypatch):
+    import threading
+    import time
+
+    monkeypatch.setattr(engine, "Transcriber", FakeTranscriber)
+    monkeypatch.setattr(engine.llm, "polish_shares_gpu", lambda cfg: False)
+    cfg = copy.deepcopy(config.DEFAULTS)
+    cfg.update(history_persist=False)
+    polishing = SlowPolishing()
+    e = engine.DictationEngine(cfg, Recorded(), polishing=polishing)
+    result = {}
+    worker = threading.Thread(
+        target=lambda: result.update(out=e._polish_for_flow("rå text", ""))
+    )
+    started = time.monotonic()
+    worker.start()
+    while e._skip_polish is None:
+        time.sleep(0.01)
+    assert e.start() is False  # ingen ny inspelning
+    worker.join(2)
+    polishing.release.set()
+    assert result["out"] == (None, "råtext vald")
+    assert time.monotonic() - started < 1.5
+    assert e._skip_polish is None

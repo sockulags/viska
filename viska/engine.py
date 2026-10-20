@@ -188,6 +188,9 @@ class DictationEngine:
         # utifrån och svarar True om en aktiv session togs över (maxtiden).
         self.take_over_key = lambda: False
         self._transcribing = threading.Event()
+        # Under en flow-polering: väljer råtexten. Ett nytt tryck på tangenten
+        # betyder "vänta inte" — snabbare än att leta upp knappen.
+        self._skip_polish = None
         self._watchdog = None
         # Serialiserar start/stopp av en dikteringssession (hotkey-trådarna
         # och maxtidstimern) och fryser vilket språk sessionen hade.
@@ -358,6 +361,11 @@ class DictationEngine:
 
     def start(self) -> bool:
         """Returnerar True om en inspelning startade (PushToTalk-kontraktet)."""
+        skip = self._skip_polish
+        if skip is not None:
+            # Texten skrivs om just nu: tangenten skriver in råtexten direkt.
+            skip()
+            return False
         with self._session_lock:
             # Profil för appen som ska ta emot texten. Språk byts ALDRIG
             # automatiskt — bara om profilen uttryckligen anger det.
@@ -827,10 +835,12 @@ class DictationEngine:
             insert_raw=lambda: choice.setdefault("pick", "raw"),
             cancel=lambda: choice.setdefault("pick", "cancel"),
         )
+        self._skip_polish = lambda: choice.setdefault("pick", "raw")
         threading.Thread(target=work, daemon=True, name="viska-flow-polish").start()
         deadline = time.monotonic() + FLOW_POLISH_TIMEOUT_S
         while not done.is_set() and not choice and time.monotonic() < deadline:
             time.sleep(0.03)
+        self._skip_polish = None
         # Knapparna bort så att nästa status inte ärver dem.
         self.feedback.inserting()
         if choice.get("pick") == "cancel":
