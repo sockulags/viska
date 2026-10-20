@@ -226,6 +226,7 @@ class EngineHost:
         self.engine = DictationEngine(self.cfg, self.feedback, self.polishing)
         self.engine.take_over_key = self._take_over_key
         self.hotkey = None
+        self.server = None  # transkriberingsservern för mötesljud, när den körs
         self.configured = False
         self.running = True
 
@@ -341,10 +342,24 @@ class EngineHost:
     def cmd_list_mics(self, _message: dict) -> dict:
         return {"mics": mics.list_inputs()}
 
+    def cmd_serve_transcription(self, message: dict) -> dict:
+        """Låt mötesljud skrivas ut med motorns modell: en OpenAI-kompatibel
+        /v1/audio/transcriptions på 127.0.0.1. Porten väljs fritt om den
+        inte anges. Ett andra anrop svarar med den som redan körs."""
+        if self.server is None:
+            from viska.transcription_server import TranscriptionServer
+
+            self.server = TranscriptionServer(self.engine, port=int(message.get("port") or 0))
+            self.server.start()
+        return {"port": self.server.port, "url": f"http://127.0.0.1:{self.server.port}/v1"}
+
     def cmd_quit(self, _message: dict) -> None:
         self.running = False
 
     def close(self) -> None:
+        if self.server is not None:
+            self.server.stop()
+            self.server = None
         if self.hotkey is not None:
             self.hotkey.stop()
             self.hotkey = None

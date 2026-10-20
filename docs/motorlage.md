@@ -29,6 +29,7 @@ Varje kommando kan ha ett `id`. Svaret har samma `id`.
 | `list_mics` | | `mics`: `[{name, bluetooth, default}]`, där `name` kan sparas som `input_device` |
 | `polished` | `request`, `text` | `accepted`: svar på en `polish_request` med den omskrivna texten |
 | `polish_failed` | `request`, `message` | `accepted`: svar på en `polish_request` som inte gick; råtexten skrivs in |
+| `serve_transcription` | `port` (valfri) | `port`, `url`: en OpenAI-kompatibel `/v1/audio/transcriptions` på 127.0.0.1 som använder motorns modell |
 | `quit` | | motorn avslutar efter svaret |
 
 Den första `configure` tar dikteringstangenten och laddar modellen. Senare
@@ -70,6 +71,18 @@ rad ger ett fel med `cmd: null`, och motorn fortsätter.
 | `notice` | `message` | Kort upplysning, till exempel "Avbruten". |
 
 Händelserna kan komma från olika trådar men skrivs alltid som hela rader.
+
+## Mötesljud med samma modell
+
+`serve_transcription` startar en lokal server som tar emot ljudfiler precis som
+Referats egen transkriberingsserver (`multipart/form-data` med `file`, `language` och
+`response_format`, svar som `verbose_json` med `segments`). Den använder motorns varma
+modell, så ett möte på en dator med grafikkort skrivs ut med samma large-modell som
+dikteringen.
+
+Ljudet skrivs ut i bitar på ungefär 30 sekunder, med snittet i den tystaste stunden nära
+gränsen. Modellen tas med låg prioritet för varje bit, så en diktering som väntar går
+före och väntar som mest på biten som redan pågår.
 
 ## Polering
 

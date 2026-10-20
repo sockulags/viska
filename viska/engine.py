@@ -330,6 +330,18 @@ class DictationEngine:
         elif self.language not in self.transcribers:
             self.load_model_async(self.language)
 
+    def transcriber_for(self, lang: str) -> Transcriber:
+        """Språkets modell, laddad nu om den inte redan är det (för mötesljud
+        som kommer in när ingen diktering har behövt språket än)."""
+        lang = lang if lang in LANG_NAMES else self.language
+        transcriber = self.transcribers.get(lang)
+        if transcriber is None:
+            self.load_model(lang, quiet=True)
+            transcriber = self.transcribers.get(lang)
+        if transcriber is None:
+            raise RuntimeError("modellen kunde inte laddas")
+        return transcriber
+
     def load_model_async(self, lang: str, force: bool = False, quiet: bool = False):
         threading.Thread(
             target=self.load_model, args=(lang, force, quiet), daemon=True
