@@ -95,13 +95,17 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
 - Beslutet om KB-Whisper-stil för diktering (`standard` eller `subtitle`), när mätningen
   av utfyllnadsord finns.
 
-**Inte gjort, utanför checklistan**
-- Fråga en gång när ett Bluetooth-headset ansluts (Bluetooth-avsnittet, punkt 2). I dag
-  syns valet och varningen bara i inställningarna.
-- En knapp som fångar tangenten i Referats inställningar; i dag skrivs den in som text.
-- Regler per program (Viskas app-profiler) i Referat.
-- Statusrutan i Referat visar "Polerar …" men har inga knappar för "infoga råtext" och
-  "avbryt"; motorn har kommandona.
+**Gjort efter checklistan (Referat 0.12.0-beta.1)**
+- Första gången dikteringen låter ett Bluetooth-headset vara säger en notis varför, en
+  gång per headset. Ett klick öppnar dikteringsinställningarna (referat#146).
+- Statusrutan visar "Infoga råtext" och "Avbryt" medan AI:n skriver om; rutan tar klick
+  bara då, och utan att ta fokus (referat#146).
+- Tangenten väljs genom att trycka den, även musens tumknappar (referat#147).
+- En nyansluten mikrofon hittas när mikrofonen öppnas, utan omstart.
+
+**Inte gjort, med avsikt**
+- Regler per program (Viskas app-profiler). De behövs bara om något kan efterbehandla
+  dikteringen per program; utan det gör de ingen skillnad.
 
 ## Riktning
 
