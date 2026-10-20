@@ -98,8 +98,6 @@ Bockas av allteftersom arbetet landar på `main`. Numren pekar på punkterna i f
 **Inte gjort, utanför checklistan**
 - Fråga en gång när ett Bluetooth-headset ansluts (Bluetooth-avsnittet, punkt 2). I dag
   syns valet och varningen bara i inställningarna.
-- Lyssna på enhetsändringar (punkt 7). Valet görs om vid varje öppning av mikrofonen, men
-  PortAudio ser en nyss ansluten enhet först efter en omstart av ljudet.
 - En knapp som fångar tangenten i Referats inställningar; i dag skrivs den in som text.
 - Regler per program (Viskas app-profiler) i Referat.
 - Statusrutan i Referat visar "Polerar …" men har inga knappar för "infoga råtext" och

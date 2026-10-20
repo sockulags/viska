@@ -20,7 +20,10 @@ Vilken mikrofon som öppnas avgörs vid varje öppning (se mics.py), så att
 ett Bluetooth-headset som blivit Windows standard inte används i onödan.
 
 PortAudio fryser enhetslistan vid init och följer inte Windows byte av
-standardmikrofon. En vakthund upptäcker att callbacken tystnat (enheten
+standardmikrofon. Före varje öppning jämförs därför Windows lista över
+inspelningsenheter med den som gällde förra gången; har något anslutits
+eller kopplats bort byggs PortAudio om, så att ett nyss anslutet headset
+syns direkt. En vakthund upptäcker att callbacken tystnat (enheten
 försvann) och bygger då om PortAudio; traymenyn kan också trigga det
 manuellt via restart().
 """
@@ -32,6 +35,8 @@ from collections import deque
 
 import numpy as np
 import sounddevice as sd
+
+from viska import mics
 
 log = logging.getLogger(__name__)
 
@@ -86,6 +91,7 @@ class Recorder:
         self._heard_audio = False
         self._stream_lock = threading.Lock()
         self._stream = None
+        self._endpoints = None  # Windows enhetslista vid förra öppningen
         self._last_frame_t = 0.0
         self.level = 0.0
         if self._mode == ALWAYS:
@@ -283,6 +289,11 @@ class Recorder:
         self._open_stream()
 
     def _open_stream(self) -> None:
+        endpoints = mics.endpoint_signature()
+        if self._endpoints is not None and endpoints != self._endpoints:
+            log.info("Mikrofonerna har ändrats – läser in dem på nytt")
+            self._reset_portaudio()
+        self._endpoints = endpoints
         device = self._device() if callable(self._device) else self._device
         kwargs = dict(
             samplerate=SAMPLE_RATE,

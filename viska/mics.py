@@ -160,6 +160,35 @@ def in_call(users: list[str] | None = None) -> bool:
     return any(_CALL_APPS.search(user) for user in users)
 
 
+def endpoint_signature() -> tuple:
+    """Vilka inspelningsenheter Windows har och i vilket tillstånd, för att
+    märka att något anslutits eller kopplats bort. Läses ur registret och
+    kostar någon millisekund."""
+    try:
+        import winreg
+    except ImportError:
+        return ()
+    result = []
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _CAPTURE_KEY)
+    except OSError:
+        return ()
+    with root:
+        index = 0
+        while True:
+            try:
+                guid = winreg.EnumKey(root, index)
+            except OSError:
+                break
+            index += 1
+            try:
+                with winreg.OpenKey(root, guid) as key:
+                    result.append((guid, winreg.QueryValueEx(key, "DeviceState")[0]))
+            except OSError:
+                continue
+    return tuple(sorted(result))
+
+
 def _hardware(name: str) -> str:
     """'Headset (Jabra Evolve3 85 Hands-Free)' -> 'Jabra Evolve3 85 Hands-Free'."""
     match = re.search(r"\(([^()]*)\)\s*$", name)
